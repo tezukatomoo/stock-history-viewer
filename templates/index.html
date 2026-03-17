@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>歴史的事象と株価・資源価格ビューア</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <h1>歴史的事象と市場動向ビューア</h1>
+        <p class="subtitle">過去の危機・紛争時に株価・資源価格がどう動いたかを確認</p>
+    </header>
+
+    <main>
+        <!-- 検索パネル -->
+        <section class="search-panel">
+            <div class="search-row">
+                <input type="text" id="searchInput" placeholder="キーワード検索（例：イラン、戦争、石油、パンデミック...）">
+                <select id="categoryFilter">
+                    <option value="">全カテゴリ</option>
+                </select>
+            </div>
+        </section>
+
+        <!-- タイムライン -->
+        <section class="timeline-section">
+            <h2>世界の主要事象タイムライン</h2>
+            <div class="timeline-controls">
+                <button class="era-btn active" data-start="1950" data-end="2026">全期間</button>
+                <button class="era-btn" data-start="1950" data-end="1975">1950-1975</button>
+                <button class="era-btn" data-start="1975" data-end="2000">1975-2000</button>
+                <button class="era-btn" data-start="2000" data-end="2026">2000-現在</button>
+            </div>
+            <div class="timeline-container" id="timeline"></div>
+        </section>
+
+        <!-- イベント詳細 + チャート -->
+        <section class="detail-section" id="detailSection" style="display:none;">
+            <div class="detail-header">
+                <h2 id="eventTitle"></h2>
+                <span class="category-badge" id="eventCategory"></span>
+                <span class="date-range" id="eventDates"></span>
+                <button class="close-btn" id="closeDetail">&times;</button>
+            </div>
+            <p id="eventDescription"></p>
+            <div class="impact-box">
+                <h3>市場への影響</h3>
+                <p id="eventMarketImpact"></p>
+            </div>
+            <div class="impact-box japan-impact" id="japanImpactBox" style="display:none;">
+                <h3>🇯🇵 日本への影響</h3>
+                <p id="japanImpactText"></p>
+            </div>
+
+            <!-- 重要日付タイムライン -->
+            <div class="key-dates-section" id="keyDatesSection" style="display:none;">
+                <h3>主要な出来事</h3>
+                <div class="key-dates-list" id="keyDatesList"></div>
+            </div>
+
+            <!-- 指標選択 -->
+            <div class="chart-controls">
+                <h3>チャート表示</h3>
+                <div class="index-selector" id="indexSelector"></div>
+                <div class="margin-control">
+                    <label>前後表示期間:
+                        <select id="marginDays">
+                            <option value="14">±2週間</option>
+                            <option value="30" selected>±1ヶ月</option>
+                            <option value="60">±2ヶ月</option>
+                            <option value="90">±3ヶ月</option>
+                            <option value="180">±6ヶ月</option>
+                            <option value="365">±1年</option>
+                        </select>
+                    </label>
+                </div>
+                <button class="btn-primary" id="loadChart">チャートを読み込む</button>
+            </div>
+            <div class="chart-container" id="chartContainer" style="display:none;">
+                <canvas id="stockChart"></canvas>
+                <div class="chart-loading" id="chartLoading" style="display:none;">
+                    <div class="spinner"></div>
+                    <p>株価データを取得中...</p>
+                </div>
+            </div>
+
+            <!-- 類似イベント比較 -->
+            <div class="similar-section">
+                <h3>類似の過去事象</h3>
+                <div id="similarEvents"></div>
+
+                <!-- 比較チャート -->
+                <div class="compare-controls" id="compareControls" style="display:none;">
+                    <h3>類似事象との株価比較（正規化）</h3>
+                    <p class="hint">イベント開始日を基準(0%)に、前後の値動きを比較します</p>
+                    <div class="compare-index-selector">
+                        <label>比較指標:
+                            <select id="compareIndex">
+                                <optgroup label="主要株式指数">
+                                    <option value="^GSPC">S&P 500</option>
+                                    <option value="^DJI">NYダウ</option>
+                                    <option value="^IXIC">NASDAQ</option>
+                                    <option value="^N225">日経平均</option>
+                                    <option value="^FTSE">FTSE 100</option>
+                                    <option value="^GDAXI">DAX</option>
+                                    <option value="^HSI">ハンセン</option>
+                                </optgroup>
+                                <optgroup label="アジア・新興国・資源国">
+                                    <option value="^KS11">韓国KOSPI</option>
+                                    <option value="^BSESN">インドSENSEX</option>
+                                    <option value="EEM">新興国株ETF</option>
+                                    <option value="FXI">中国大型株ETF</option>
+                                    <option value="EWJ">日本株ETF</option>
+                                </optgroup>
+                                <optgroup label="セクターETF">
+                                    <option value="XLE">エネルギー</option>
+                                    <option value="XLF">金融</option>
+                                    <option value="XLV">ヘルスケア</option>
+                                    <option value="ITA">防衛・航空宇宙</option>
+                                    <option value="HACK">サイバーセキュリティ</option>
+                                    <option value="URA">ウラン・原子力</option>
+                                </optgroup>
+                                <optgroup label="エネルギー">
+                                    <option value="CL=F">原油</option>
+                                    <option value="NG=F">天然ガス</option>
+                                </optgroup>
+                                <optgroup label="貴金属・資源">
+                                    <option value="GC=F">金</option>
+                                    <option value="SI=F">銀</option>
+                                    <option value="HG=F">銅</option>
+                                    <option value="PL=F">プラチナ</option>
+                                    <option value="GDX">金鉱株ETF</option>
+                                </optgroup>
+                                <optgroup label="穀物・食料・農産物">
+                                    <option value="ZW=F">小麦</option>
+                                    <option value="ZC=F">トウモロコシ</option>
+                                    <option value="ZS=F">大豆</option>
+                                    <option value="KC=F">コーヒー</option>
+                                    <option value="CT=F">綿花</option>
+                                    <option value="SB=F">砂糖</option>
+                                    <option value="LBS=F">木材</option>
+                                </optgroup>
+                                <optgroup label="為替">
+                                    <option value="JPY=X">ドル/円</option>
+                                    <option value="EURUSD=X">ユーロ/ドル</option>
+                                    <option value="CHF=X">ドル/スイスフラン</option>
+                                    <option value="GBP=X">ポンド/ドル</option>
+                                    <option value="AUD=X">豪ドル/ドル</option>
+                                    <option value="DX-Y.NYB">ドルインデックス</option>
+                                </optgroup>
+                                <optgroup label="債券・信用リスク">
+                                    <option value="^TNX">米10年国債利回り</option>
+                                    <option value="TLT">米長期国債ETF</option>
+                                    <option value="LQD">投資適格社債ETF</option>
+                                    <option value="HYG">ハイイールド債ETF</option>
+                                </optgroup>
+                                <optgroup label="リスク指標・暗号資産">
+                                    <option value="^VIX">VIX恐怖指数</option>
+                                    <option value="^RUT">ラッセル2000(小型株)</option>
+                                    <option value="BTC-USD">ビットコイン</option>
+                                </optgroup>
+                            </select>
+                        </label>
+                        <button class="btn-primary" id="loadCompare">比較チャートを表示</button>
+                    </div>
+                    <div class="chart-container" id="compareChartContainer" style="display:none;">
+                        <canvas id="compareChart"></canvas>
+                        <div class="chart-loading" id="compareLoading" style="display:none;">
+                            <div class="spinner"></div>
+                            <p>比較データを取得中...</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>株価データ: Yahoo Finance | イベントデータは参考情報です</p>
+    </footer>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
