@@ -906,7 +906,9 @@ footer {
 .last-update-time {
     font-size: 0.9rem;
     color: var(--text-primary);
-    margin-top: 12px;
+    margin-top: 20px;
+    margin-bottom: 8px;
+    padding-top: 12px;
     text-align: right;
     font-family: 'Courier New', monospace;
     font-weight: 600;
