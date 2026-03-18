@@ -904,11 +904,12 @@ footer {
 }
 
 .last-update-time {
-    font-size: 0.68rem;
-    color: var(--text-muted);
+    font-size: 0.82rem;
+    color: var(--text-secondary);
     margin-top: 10px;
     text-align: right;
     font-family: 'Courier New', monospace;
+    font-weight: 500;
 }
 
 /* ============================================================
