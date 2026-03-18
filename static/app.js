@@ -1030,7 +1030,9 @@ function updateLastRefreshTime() {
         const el = document.createElement('div');
         el.className = 'last-update-time';
         el.textContent = `最終更新: ${timeStr}`;
-        document.getElementById('predChartContainer').appendChild(el);
+        // チャートコンテナの外（親）に追加して枠と被らないようにする
+        const chartContainer = document.getElementById('predChartContainer');
+        chartContainer.parentNode.insertBefore(el, chartContainer.nextSibling);
     }
 }
 
