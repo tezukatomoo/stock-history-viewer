@@ -4,8 +4,171 @@ import os
 import yfinance as yf
 from datetime import datetime, timedelta
 import numpy as np
+import feedparser
+import threading
+import time
 
 app = Flask(__name__)
+
+# ============================================================
+# NEWS MONITORING (ニュース監視)
+# ============================================================
+NEWS_FEEDS = [
+    {'url': 'https://feeds.reuters.com/reuters/businessNews', 'source': 'Reuters Business'},
+    {'url': 'https://feeds.reuters.com/reuters/topNews', 'source': 'Reuters'},
+    {'url': 'https://feeds.reuters.com/reuters/JPBusinessNews', 'source': 'Reuters Japan'},
+    {'url': 'https://www.cnbc.com/id/10001147/device/rss/rss.html', 'source': 'CNBC Markets'},
+    {'url': 'https://feeds.marketwatch.com/marketwatch/topstories/', 'source': 'MarketWatch'},
+    {'url': 'https://www.investing.com/rss/news_25.rss', 'source': 'Investing.com'},
+    {'url': 'https://finance.yahoo.com/rss/topstories', 'source': 'Yahoo Finance'},
+    {'url': 'https://www.forexlive.com/feed/news', 'source': 'ForexLive'},
+]
+
+MARKET_KEYWORDS = [
+    'fed', 'federal reserve', 'interest rate', 'inflation', 'gdp', 'earnings',
+    'stock', 'market', 'nasdaq', 's&p', 'dow', 'economy', 'tariff', 'trade',
+    'recession', 'jobs', 'unemployment', 'treasury', 'bond', 'yield', 'oil',
+    'dollar', 'central bank', 'rate hike', 'rate cut', 'monetary', 'cpi', 'ppi',
+    'fomc', 'ecb', 'bank of japan', 'geopolitical', 'sanctions', 'debt', 'yen',
+    '金利', '株式', '市場', 'インフレ', '為替', '経済', '日銀', '利上げ', '利下げ',
+    '景気', 'gdp', '雇用', '物価', '円安', '円高',
+]
+
+POSITIVE_KEYWORDS = [
+    'surge', 'rally', 'gains', 'record high', 'beats', 'exceeds', 'strong growth',
+    'bullish', 'recovery', 'boost', 'rises', 'jumps', 'soars', 'optimism',
+    'rate cut', 'stimulus', 'dovish', 'outperform', 'upgrade', 'expansion',
+    'profits rise', 'hiring', 'above expectations', '上昇', '回復', '好調', '利下げ', '堅調',
+]
+
+NEGATIVE_KEYWORDS = [
+    'crash', 'plunge', 'tumble', 'falls', 'declines', 'recession', 'slowdown',
+    'misses', 'below expectations', 'concern', 'warning', 'rate hike', 'hawkish',
+    'sell-off', 'fear', 'uncertainty', 'tariff', 'sanctions', 'war', 'crisis',
+    'default', 'downgrade', 'layoffs', 'contraction', 'stagflation',
+    '下落', '低下', '懸念', '利上げ', '悪化', '急落', 'リセッション',
+]
+
+_news_cache = {'articles': [], 'impact': {'score': 0, 'direction': 'neutral', 'price_impact_pct': 0, 'article_count': 0}, 'timestamp': 0}
+NEWS_CACHE_TTL = 900  # 15 minutes
+
+
+def _calculate_news_impact(articles):
+    """Weighted sentiment → short-term price impact estimate"""
+    if not articles:
+        return {'score': 0, 'direction': 'neutral', 'price_impact_pct': 0, 'article_count': 0}
+    now = datetime.now()
+    total_score, total_weight = 0.0, 0.0
+    for a in articles[:25]:
+        try:
+            pub = datetime.fromisoformat(a['published'])
+            hours_ago = max(0.1, (now - pub).total_seconds() / 3600)
+            weight = np.exp(-hours_ago / 12) * max(1, a['relevance'])  # 12h half-life
+            total_score += a['sentiment_score'] * weight
+            total_weight += weight
+        except Exception:
+            pass
+    avg = total_score / total_weight if total_weight > 0 else 0
+    direction = 'bullish' if avg > 0.3 else ('bearish' if avg < -0.3 else 'neutral')
+    price_impact = float(np.clip(avg * 0.7, -2.5, 2.5))
+    return {
+        'score': round(avg, 2),
+        'direction': direction,
+        'price_impact_pct': round(price_impact, 2),
+        'article_count': len(articles),
+    }
+
+
+def fetch_market_news(force=False):
+    """Fetch RSS feeds from major financial news sites, cache for 15 min"""
+    now = time.time()
+    if not force and now - _news_cache['timestamp'] < NEWS_CACHE_TTL and _news_cache['articles']:
+        return _news_cache
+
+    all_articles = []
+    cutoff = datetime.now() - timedelta(hours=48)
+
+    for feed_config in NEWS_FEEDS:
+        try:
+            feed = feedparser.parse(feed_config['url'])
+            for entry in feed.entries[:15]:
+                try:
+                    if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                        pub_date = datetime(*entry.published_parsed[:6])
+                    else:
+                        pub_date = datetime.now()
+                except Exception:
+                    pub_date = datetime.now()
+
+                if pub_date < cutoff:
+                    continue
+
+                title = entry.get('title', '')
+                summary = entry.get('summary', entry.get('description', ''))
+                content = (title + ' ' + summary).lower()
+
+                relevance = sum(1 for kw in MARKET_KEYWORDS if kw in content)
+                if relevance == 0:
+                    continue
+
+                pos = sum(1 for kw in POSITIVE_KEYWORDS if kw in content)
+                neg = sum(1 for kw in NEGATIVE_KEYWORDS if kw in content)
+
+                if pos > neg:
+                    sentiment = 'bullish'
+                    s_score = pos - neg
+                elif neg > pos:
+                    sentiment = 'bearish'
+                    s_score = -(neg - pos)
+                else:
+                    sentiment = 'neutral'
+                    s_score = 0
+
+                all_articles.append({
+                    'title': title,
+                    'url': entry.get('link', '#'),
+                    'source': feed_config['source'],
+                    'published': pub_date.isoformat(),
+                    'published_str': pub_date.strftime('%m/%d %H:%M'),
+                    'sentiment': sentiment,
+                    'sentiment_score': s_score,
+                    'relevance': relevance,
+                })
+        except Exception as e:
+            print(f"Feed error [{feed_config['source']}]: {e}")
+
+    # Sort by recency, deduplicate by title
+    all_articles.sort(key=lambda x: x['published'], reverse=True)
+    seen = set()
+    unique = []
+    for a in all_articles:
+        key = a['title'][:45].lower().strip()
+        if key not in seen:
+            seen.add(key)
+            unique.append(a)
+    unique = unique[:35]
+
+    impact = _calculate_news_impact(unique)
+    _news_cache['articles'] = unique
+    _news_cache['impact'] = impact
+    _news_cache['timestamp'] = now
+    print(f"[News] Fetched {len(unique)} articles, impact={impact['direction']} ({impact['price_impact_pct']:+.2f}%)")
+    return _news_cache
+
+
+def _news_refresh_loop():
+    """Background thread: refresh news every 15 minutes"""
+    time.sleep(10)  # Wait for app startup
+    while True:
+        try:
+            fetch_market_news(force=True)
+        except Exception as e:
+            print(f"[News BG] Error: {e}")
+        time.sleep(NEWS_CACHE_TTL)
+
+
+_news_bg_thread = threading.Thread(target=_news_refresh_loop, daemon=True)
+_news_bg_thread.start()
 
 # Load events data
 DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
@@ -1035,6 +1198,28 @@ def predict_stock(symbol):
             'ou_mu_price': round(float(np.exp(mu_ou)), 2),
         }
 
+        # News sentiment impact
+        news_cache = fetch_market_news()
+        news_impact = news_cache['impact']
+        news_articles = news_cache['articles'][:10]
+
+        # Apply news impact as a short-term price adjustment
+        news_impact_pct = news_impact.get('price_impact_pct', 0)
+        if news_impact_pct != 0:
+            for pt in prediction:
+                day = pt['day']
+                # Decay: full impact for day 1-7, fades to 0 by day 60
+                decay = max(0.0, 1.0 - day / 60.0)
+                adj_pct = news_impact_pct * decay
+                if adj_pct != 0:
+                    pt['price'] = round(pt['price'] * (1 + adj_pct / 100), 2)
+                    pt['change_pct'] = round((pt['price'] / last_price - 1) * 100, 2)
+                    if 'upper_80' in pt:
+                        pt['upper_80'] = round(pt['upper_80'] * (1 + adj_pct / 100), 2)
+                        pt['upper_50'] = round(pt['upper_50'] * (1 + adj_pct / 100), 2)
+                        pt['lower_50'] = round(pt['lower_50'] * (1 + adj_pct / 100), 2)
+                        pt['lower_80'] = round(pt['lower_80'] * (1 + adj_pct / 100), 2)
+
         # ============================================================
         # API RESPONSE
         # ============================================================
@@ -1068,11 +1253,24 @@ def predict_stock(symbol):
                 'outcome': p['outcome']
             } for p in top_patterns],
             'current_data': current_data,
-            'forecast_days': forecast_days
+            'forecast_days': forecast_days,
+            'news_impact': news_impact,
+            'recent_news': news_articles,
         })
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/news')
+def get_news():
+    """Return cached market news with sentiment impact"""
+    cache = fetch_market_news()
+    return jsonify({
+        'articles': cache['articles'],
+        'impact': cache['impact'],
+        'fetched_at': datetime.fromtimestamp(cache['timestamp']).strftime('%H:%M:%S') if cache['timestamp'] else None
+    })
 
 
 if __name__ == '__main__':

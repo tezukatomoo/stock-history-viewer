@@ -864,6 +864,42 @@ function getActualForecastDays() {
     return parseInt(val);
 }
 
+function renderNewsPanel(data) {
+    const panel = document.getElementById('newsPanel');
+    const list = document.getElementById('newsList');
+    const badge = document.getElementById('newsImpactBadge');
+    const updatedAt = document.getElementById('newsUpdatedAt');
+
+    const articles = data.recent_news || [];
+    const impact = data.news_impact || {};
+
+    if (!articles.length) { panel.style.display = 'none'; return; }
+
+    // Impact badge
+    const dirMap = { bullish: { label: '強気シグナル', cls: 'bullish' }, bearish: { label: '弱気シグナル', cls: 'bearish' }, neutral: { label: '中立', cls: 'neutral' } };
+    const dir = dirMap[impact.direction] || dirMap.neutral;
+    const impactSign = impact.price_impact_pct >= 0 ? '+' : '';
+    badge.className = `news-impact-badge ${dir.cls}`;
+    badge.innerHTML = `<span class="impact-dir">${dir.label}</span><span class="impact-val">${impactSign}${impact.price_impact_pct}%</span>`;
+
+    updatedAt.textContent = `${articles.length}件 · 短期予測に反映済み`;
+
+    // News list
+    list.innerHTML = articles.map(a => {
+        const sentIcon = a.sentiment === 'bullish' ? '▲' : (a.sentiment === 'bearish' ? '▼' : '―');
+        const sentCls = a.sentiment === 'bullish' ? 'sent-up' : (a.sentiment === 'bearish' ? 'sent-down' : 'sent-flat');
+        return `<a class="news-item" href="${a.url}" target="_blank" rel="noopener">
+            <span class="news-sent ${sentCls}">${sentIcon}</span>
+            <div class="news-body">
+                <p class="news-title">${a.title}</p>
+                <span class="news-meta">${a.source} · ${a.published_str}</span>
+            </div>
+        </a>`;
+    }).join('');
+
+    panel.style.display = 'block';
+}
+
 async function loadPrediction(silent) {
     const symbol = document.getElementById('predSymbol').value;
     const forecastDays = getActualForecastDays();
@@ -888,6 +924,7 @@ async function loadPrediction(silent) {
         document.getElementById('modelPanel').style.display = 'none';
         document.getElementById('riskPanel').style.display = 'none';
         document.getElementById('crossAssetPanel').style.display = 'none';
+        document.getElementById('newsPanel').style.display = 'none';
     }
 
     if (predictionChart) { predictionChart.destroy(); predictionChart = null; }
@@ -929,6 +966,9 @@ async function loadPrediction(silent) {
 
         // クロスアセットシグナル
         renderCrossAssetSignals(data);
+
+        // ニュースパネル
+        renderNewsPanel(data);
 
         // 寄与イベント
         renderContributingEvents(data.contributing_events);
