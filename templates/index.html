@@ -3,19 +3,119 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>歴史的事象と株価・資源価格ビューア</title>
+    <title>歴史的事象と市場動向分析AI</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
     <header>
-        <h1>歴史的事象と市場動向ビューア</h1>
-        <p class="subtitle">過去の危機・紛争時に株価・資源価格がどう動いたかを確認</p>
+        <h1>歴史的事象と市場動向分析AI</h1>
+        <p class="subtitle">過去の危機・紛争時に株価・資源価格がどう動いたかを確認し、経済モデルで今後を予測</p>
     </header>
 
     <main>
+        <!-- 予測セクション -->
+        <section class="prediction-section">
+            <div class="prediction-header">
+                <h2>AI予測チャート</h2>
+                <p class="hint">過去30件の歴史的事象パターンと現在の市場要因から、今後の動きを予測</p>
+            </div>
+            <div class="prediction-controls">
+                <div class="pred-selector">
+                    <label>対象指標:
+                        <select id="predSymbol">
+                            <option value="^GSPC">S&P 500</option>
+                            <option value="^IXIC">NASDAQ</option>
+                        </select>
+                    </label>
+                    <label>予測期間:
+                        <select id="predDays">
+                            <option value="30">30日</option>
+                            <option value="60">60日</option>
+                            <option value="90">90日</option>
+                            <option value="180">180日</option>
+                            <option value="year_end" selected>年末まで</option>
+                            <option value="365">1年</option>
+                        </select>
+                    </label>
+                    <label>自動更新:
+                        <select id="predAutoRefresh">
+                            <option value="0">オフ</option>
+                            <option value="60">1分</option>
+                            <option value="300" selected>5分</option>
+                            <option value="600">10分</option>
+                            <option value="1800">30分</option>
+                        </select>
+                    </label>
+                    <button class="btn-primary btn-predict" id="loadPrediction">予測を生成</button>
+                    <span class="auto-refresh-status" id="autoRefreshStatus"></span>
+                </div>
+            </div>
+
+            <!-- 現在の市場状況 -->
+            <div class="market-status" id="marketStatus" style="display:none;">
+                <div class="status-cards" id="statusCards"></div>
+            </div>
+
+            <!-- 要因分析 -->
+            <div class="factor-analysis" id="factorAnalysis" style="display:none;">
+                <h3>現在の市場要因</h3>
+                <div class="factor-grid" id="factorGrid"></div>
+            </div>
+
+            <!-- 予測チャート -->
+            <div class="chart-container prediction-chart-container" id="predChartContainer" style="display:none;">
+                <canvas id="predictionChart"></canvas>
+                <div class="chart-loading" id="predLoading" style="display:none;">
+                    <div class="spinner"></div>
+                    <p>過去の事象パターンを分析中...</p>
+                </div>
+            </div>
+
+            <!-- 予測サマリー -->
+            <div class="prediction-summary" id="predSummary" style="display:none;">
+                <h3>予測サマリー</h3>
+                <div class="summary-cards" id="summaryCards"></div>
+            </div>
+
+            <!-- テクニカル指標 -->
+            <div class="technical-indicators-panel" id="technicalPanel" style="display:none;">
+                <h3>テクニカル指標</h3>
+                <div class="tech-grid" id="techGrid"></div>
+            </div>
+
+            <!-- モデル分解 -->
+            <div class="model-breakdown-panel" id="modelPanel" style="display:none;">
+                <h3>予測モデル分解</h3>
+                <p class="hint">各モデルコンポーネントの寄与度とウェイト</p>
+                <div class="model-weights" id="modelWeights"></div>
+                <div class="model-details" id="modelDetails"></div>
+            </div>
+
+            <!-- リスク指標 -->
+            <div class="risk-metrics-panel" id="riskPanel" style="display:none;">
+                <h3>リスク指標</h3>
+                <div class="risk-grid" id="riskGrid"></div>
+            </div>
+
+            <!-- クロスアセットシグナル -->
+            <div class="cross-asset-panel" id="crossAssetPanel" style="display:none;">
+                <h3>クロスアセット・シグナル</h3>
+                <p class="hint">各資産クラスのz-scoreと市場シグナル</p>
+                <div class="cross-asset-grid" id="crossAssetGrid"></div>
+            </div>
+
+            <!-- 寄与イベント -->
+            <div class="contributing-events" id="contributingEvents" style="display:none;">
+                <h3>予測に寄与した過去の事象</h3>
+                <div class="contrib-list" id="contribList"></div>
+            </div>
+        </section>
+
         <!-- 検索パネル -->
         <section class="search-panel">
             <div class="search-row">

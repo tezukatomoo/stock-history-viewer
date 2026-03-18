@@ -6,6 +6,7 @@ let selectedEvent = null;
 let selectedSimilarIds = [];
 let stockChart = null;
 let compareChart = null;
+let predictionChart = null;
 
 // 重要日付データ（チャート上にマーカー表示）
 const keyDatesData = {
@@ -575,9 +576,12 @@ async function loadStockChart() {
     const scales = {
         x: {
             type: 'time',
-            time: { unit: 'day', tooltipFormat: 'yyyy-MM-dd' },
+            time: {
+                tooltipFormat: 'yyyy年M月d日',
+                displayFormats: { day: 'yyyy/M/d', week: 'yyyy/M/d', month: 'yyyy年M月', year: 'yyyy年' }
+            },
             grid: { color: '#e8ecf0' },
-            ticks: { color: '#7f8c9b' }
+            ticks: { color: '#7f8c9b', maxTicksLimit: 10 }
         }
     };
 
@@ -608,7 +612,11 @@ async function loadStockChart() {
                     titleColor: '#2c3e50',
                     bodyColor: '#5a6a7a'
                 },
-                annotation: undefined
+                annotation: undefined,
+                zoom: {
+                    pan: { enabled: true, mode: 'x' },
+                    zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' }
+                }
             },
             scales
         }
@@ -810,6 +818,10 @@ async function loadCompareChart() {
                             title: (items) => `イベント開始日から ${items[0].raw.x} 日`,
                             label: (item) => `${item.dataset.label}: ${item.raw.y > 0 ? '+' : ''}${item.raw.y.toFixed(2)}%`
                         }
+                    },
+                    zoom: {
+                        pan: { enabled: true, mode: 'x' },
+                        zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' }
                     }
                 },
                 scales: {
@@ -838,6 +850,706 @@ async function loadCompareChart() {
     }
 }
 
+// ===== Prediction =====
+let autoRefreshTimer = null;
+let lastPredictionData = null;
+
+function getActualForecastDays() {
+    const val = document.getElementById('predDays').value;
+    if (val === 'year_end') {
+        const now = new Date();
+        const yearEnd = new Date(now.getFullYear(), 11, 31);
+        return Math.ceil((yearEnd - now) / (1000 * 60 * 60 * 24));
+    }
+    return parseInt(val);
+}
+
+async function loadPrediction(silent) {
+    const symbol = document.getElementById('predSymbol').value;
+    const forecastDays = getActualForecastDays();
+    const btn = document.getElementById('loadPrediction');
+    const loading = document.getElementById('predLoading');
+    const chartContainer = document.getElementById('predChartContainer');
+
+    btn.disabled = true;
+    btn.textContent = '分析中...';
+    chartContainer.style.display = 'block';
+    if (!silent) {
+        loading.style.display = 'flex';
+    }
+
+    // 他のコンテナを非表示に（初回のみ）
+    if (!silent) {
+        document.getElementById('marketStatus').style.display = 'none';
+        document.getElementById('factorAnalysis').style.display = 'none';
+        document.getElementById('predSummary').style.display = 'none';
+        document.getElementById('contributingEvents').style.display = 'none';
+        document.getElementById('technicalPanel').style.display = 'none';
+        document.getElementById('modelPanel').style.display = 'none';
+        document.getElementById('riskPanel').style.display = 'none';
+        document.getElementById('crossAssetPanel').style.display = 'none';
+    }
+
+    if (predictionChart) { predictionChart.destroy(); predictionChart = null; }
+
+    try {
+        const resp = await fetch(`/api/predict/${encodeURIComponent(symbol)}?forecast_days=${forecastDays}`);
+        const data = await resp.json();
+
+        if (data.error) {
+            if (!silent) alert('予測の生成に失敗しました: ' + data.error);
+            loading.style.display = 'none';
+            btn.disabled = false;
+            btn.textContent = '予測を生成';
+            return;
+        }
+
+        lastPredictionData = data;
+
+        // 市場状況カード
+        renderMarketStatus(data);
+
+        // 要因分析
+        renderFactorAnalysis(data.factors);
+
+        // 予測チャート描画
+        renderPredictionChart(data);
+
+        // サマリー
+        renderPredictionSummary(data);
+
+        // テクニカル指標
+        renderTechnicalIndicators(data);
+
+        // モデル分解
+        renderModelComponents(data);
+
+        // リスク指標
+        renderRiskMetrics(data);
+
+        // クロスアセットシグナル
+        renderCrossAssetSignals(data);
+
+        // 寄与イベント
+        renderContributingEvents(data.contributing_events);
+
+        // 更新時刻表示
+        updateLastRefreshTime();
+
+    } catch (e) {
+        console.error('Prediction error:', e);
+        if (!silent) alert('予測の生成中にエラーが発生しました');
+    }
+
+    loading.style.display = 'none';
+    btn.disabled = false;
+    btn.textContent = '予測を生成';
+
+    // 自動更新セットアップ
+    setupAutoRefresh();
+}
+
+function setupAutoRefresh() {
+    if (autoRefreshTimer) {
+        clearInterval(autoRefreshTimer);
+        autoRefreshTimer = null;
+    }
+
+    const interval = parseInt(document.getElementById('predAutoRefresh').value);
+    const statusEl = document.getElementById('autoRefreshStatus');
+
+    if (interval > 0 && lastPredictionData) {
+        autoRefreshTimer = setInterval(() => {
+            loadPrediction(true);
+        }, interval * 1000);
+
+        const minutes = interval >= 60 ? `${interval / 60}分` : `${interval}秒`;
+        statusEl.innerHTML = `<span class="live-dot"></span> ${minutes}毎に自動更新`;
+    } else {
+        statusEl.innerHTML = '';
+    }
+}
+
+function updateLastRefreshTime() {
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const existing = document.querySelector('.last-update-time');
+    if (existing) {
+        existing.textContent = `最終更新: ${timeStr}`;
+    } else {
+        const el = document.createElement('div');
+        el.className = 'last-update-time';
+        el.textContent = `最終更新: ${timeStr}`;
+        document.getElementById('predChartContainer').appendChild(el);
+    }
+}
+
+function renderMarketStatus(data) {
+    const container = document.getElementById('marketStatus');
+    const cards = document.getElementById('statusCards');
+    container.style.display = 'block';
+    cards.innerHTML = '';
+
+    const symbolName = data.symbol === '^GSPC' ? 'S&P 500' : 'NASDAQ';
+
+    // レジーム情報
+    const regimeIcons = { bull: '🟢', bear: '🔴', high_volatility: '🟡', sideways: '⚪' };
+    const regimeLabel = data.regime ? data.regime.label : '';
+    const regimeIcon = data.regime ? (regimeIcons[data.regime.classification] || '') : '';
+
+    const items = [
+        { label: symbolName + ' 現在値', value: data.last_price.toLocaleString(), change: data.current_trend },
+        { label: 'マーケットレジーム', value: regimeIcon + ' ' + regimeLabel, isRegime: true },
+        { label: 'EWMA ボラティリティ', value: data.current_volatility + '%', isVol: true },
+        { label: 'RSI(14)', value: data.technical_indicators ? data.technical_indicators.rsi_14 : '-', isRSI: true },
+        { label: 'モメンタムスコア', value: data.technical_indicators ? data.technical_indicators.momentum_score : '-', isMomentum: true },
+        { label: '基準日', value: data.last_date }
+    ];
+
+    items.forEach(item => {
+        const card = document.createElement('div');
+        card.className = 'status-card';
+        let extraClass = '';
+        if (item.isRegime) {
+            const r = data.regime ? data.regime.classification : '';
+            extraClass = r === 'bull' ? 'positive' : (r === 'bear' ? 'negative' : '');
+        } else if (item.isMomentum && typeof item.value === 'number') {
+            extraClass = item.value >= 0 ? 'positive' : 'negative';
+        } else if (item.isRSI && typeof item.value === 'number') {
+            extraClass = item.value > 70 ? 'negative' : (item.value < 30 ? 'positive' : '');
+        } else if (item.isVol) {
+            extraClass = data.current_volatility > 25 ? 'negative' : (data.current_volatility > 15 ? '' : 'positive');
+        }
+        card.innerHTML = `
+            <div class="sc-label">${item.label}</div>
+            <div class="sc-value ${extraClass}">${typeof item.value === 'number' ? item.value.toLocaleString() : item.value}</div>
+            ${item.change !== undefined ? `<div class="sc-change ${item.change >= 0 ? 'positive' : 'negative'}">${item.change >= 0 ? '+' : ''}${item.change}%</div>` : ''}
+        `;
+        cards.appendChild(card);
+    });
+}
+
+function renderFactorAnalysis(factors) {
+    if (!factors || Object.keys(factors).length === 0) return;
+
+    const container = document.getElementById('factorAnalysis');
+    const grid = document.getElementById('factorGrid');
+    container.style.display = 'block';
+    grid.innerHTML = '';
+
+    const factorNames = {
+        vix: { name: 'VIX 恐怖指数', riskThreshold: [20, 30] },
+        gold: { name: '金 (USD/oz)', riskThreshold: null },
+        oil: { name: '原油 WTI', riskThreshold: null },
+        usdjpy: { name: 'USD/JPY', riskThreshold: null },
+        us10y: { name: '米10年債利回り', riskThreshold: [3.5, 4.5] },
+        dxy: { name: 'ドル指数', riskThreshold: null }
+    };
+
+    Object.entries(factors).forEach(([key, val]) => {
+        const info = factorNames[key] || { name: key, riskThreshold: null };
+        let riskClass = '';
+        if (info.riskThreshold) {
+            if (val.value > info.riskThreshold[1]) riskClass = 'risk-high';
+            else if (val.value > info.riskThreshold[0]) riskClass = 'risk-medium';
+            else riskClass = 'risk-low';
+        }
+
+        const card = document.createElement('div');
+        card.className = `factor-card ${riskClass}`;
+        card.innerHTML = `
+            <div class="fc-name">${info.name}</div>
+            <div class="fc-value">${val.value.toLocaleString()}</div>
+            <div class="fc-change ${val.change >= 0 ? 'positive' : 'negative'}">
+                ${val.change >= 0 ? '+' : ''}${val.change}%
+            </div>
+        `;
+        grid.appendChild(card);
+    });
+}
+
+function renderPredictionChart(data) {
+    const ctx = document.getElementById('predictionChart').getContext('2d');
+    const lastDate = new Date(data.last_date);
+    const lastPt = { x: data.last_date, y: data.last_price };
+
+    const toDatePt = (p, field) => {
+        const d = new Date(lastDate);
+        d.setDate(d.getDate() + p.day);
+        return { x: d.toISOString().split('T')[0], y: p[field] };
+    };
+
+    const historicalData = data.current_data
+        .filter(d => d.close != null)
+        .map(d => ({ x: d.date, y: d.close }));
+    const predData = [lastPt, ...data.prediction.map(p => toDatePt(p, 'price'))];
+    // 信頼区間は予測期間だけに表示（lastPtを含めないことで歴史データ側への滲み出しを防ぐ）
+    const upper50 = data.prediction.filter(p => p.upper_50).map(p => toDatePt(p, 'upper_50'));
+    const lower50 = data.prediction.filter(p => p.lower_50).map(p => toDatePt(p, 'lower_50'));
+    const upper80 = data.prediction.filter(p => p.upper_80).map(p => toDatePt(p, 'upper_80'));
+    const lower80 = data.prediction.filter(p => p.lower_80).map(p => toDatePt(p, 'lower_80'));
+
+    const symbolName = data.symbol === '^GSPC' ? 'S&P 500' : 'NASDAQ';
+
+    predictionChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            datasets: [
+                {
+                    label: symbolName + ' 実績',
+                    data: historicalData,
+                    borderColor: '#3498db',
+                    backgroundColor: 'transparent',
+                    borderWidth: 2, pointRadius: 0, pointHoverRadius: 3, tension: 0.1, order: 2
+                },
+                {
+                    label: 'ベイズ合成予測',
+                    data: predData,
+                    borderColor: '#e74c3c',
+                    backgroundColor: 'transparent',
+                    borderWidth: 2.5, borderDash: [8, 4],
+                    pointRadius: 0, pointHoverRadius: 4, tension: 0.2, order: 1
+                },
+                {
+                    label: '50%信頼区間 上限',
+                    data: upper50,
+                    borderColor: 'rgba(231,76,60,0.3)',
+                    backgroundColor: 'transparent',
+                    borderWidth: 1, borderDash: [4, 4],
+                    pointRadius: 0, tension: 0.2, fill: false, order: 3
+                },
+                {
+                    label: '50%信頼区間 下限',
+                    data: lower50,
+                    borderColor: 'rgba(231,76,60,0.3)',
+                    backgroundColor: 'rgba(231,76,60,0.08)',
+                    borderWidth: 1, borderDash: [4, 4],
+                    pointRadius: 0, tension: 0.2, fill: '-1', order: 4
+                },
+                {
+                    label: '80%信頼区間 上限',
+                    data: upper80,
+                    borderColor: 'rgba(231,76,60,0.15)',
+                    backgroundColor: 'transparent',
+                    borderWidth: 1, borderDash: [2, 4],
+                    pointRadius: 0, tension: 0.2, fill: false, order: 5
+                },
+                {
+                    label: '80%信頼区間 下限',
+                    data: lower80,
+                    borderColor: 'rgba(231,76,60,0.15)',
+                    backgroundColor: 'rgba(231,76,60,0.04)',
+                    borderWidth: 1, borderDash: [2, 4],
+                    pointRadius: 0, tension: 0.2, fill: '-1', order: 6
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'x', intersect: false },
+            plugins: {
+                legend: { labels: { color: '#2c3e50', usePointStyle: true, filter: (item) => !item.text.includes('信頼区間') || item.text.includes('50%信頼') } },
+                tooltip: {
+                    backgroundColor: '#fff', borderColor: '#dce1e8', borderWidth: 1,
+                    titleColor: '#2c3e50', bodyColor: '#5a6a7a',
+                    callbacks: { label: (item) => `${item.dataset.label}: ${item.raw.y.toLocaleString()}` }
+                },
+                annotation: {
+                    annotations: {
+                        predStart: {
+                            type: 'line', xMin: data.last_date, xMax: data.last_date,
+                            borderColor: '#95a5a6', borderWidth: 2, borderDash: [5, 5],
+                            label: { display: true, content: '予測開始', position: 'start', color: '#7f8c9b', backgroundColor: '#f0f2f5', font: { size: 11, weight: 'bold' }, padding: 4 }
+                        }
+                    }
+                },
+                zoom: {
+                    pan: { enabled: true, mode: 'x' },
+                    zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' }
+                }
+            },
+            scales: {
+                x: { type: 'time', time: { tooltipFormat: 'yyyy年M月d日', displayFormats: { day: 'yyyy/M/d', week: 'yyyy/M/d', month: 'yyyy年M月', year: 'yyyy年' } }, grid: { color: '#e8ecf0' }, ticks: { color: '#7f8c9b', maxTicksLimit: 12 } },
+                y: { grid: { color: '#e8ecf0' }, ticks: { color: '#7f8c9b', callback: v => v.toLocaleString() } }
+            }
+        }
+    });
+}
+
+function renderPredictionSummary(data) {
+    if (!data.summary || Object.keys(data.summary).length === 0) return;
+
+    const container = document.getElementById('predSummary');
+    const cards = document.getElementById('summaryCards');
+    container.style.display = 'block';
+    cards.innerHTML = '';
+
+    const periods = {
+        '30d': '30日後',
+        '60d': '60日後',
+        '90d': '3ヶ月後',
+        '180d': '6ヶ月後',
+        'year_end': `${new Date().getFullYear()}年末`
+    };
+
+    // 正しい順番で表示
+    const orderedKeys = ['30d', '60d', '90d', '180d', 'year_end'];
+    const sortedEntries = orderedKeys
+        .filter(k => data.summary[k] !== undefined)
+        .map(k => [k, data.summary[k]]);
+
+    sortedEntries.forEach(([key, val]) => {
+        const label = periods[key] || key;
+        const card = document.createElement('div');
+        card.className = 'summary-card';
+        if (key === 'year_end') {
+            card.classList.add('summary-card-highlight');
+        }
+        const changeClass = val.change_pct >= 0 ? 'positive' : 'negative';
+
+        // 確率情報
+        let probHtml = '';
+        if (val.prob_within_5pct !== undefined) {
+            const probUpClass = val.prob_up >= 60 ? 'positive' : (val.prob_up <= 40 ? 'negative' : '');
+            probHtml = `
+                <div class="sm-prob-section">
+                    <div class="sm-prob-row">
+                        <span class="sm-prob-label">上昇確率</span>
+                        <span class="sm-prob-value ${probUpClass}">${val.prob_up}%</span>
+                    </div>
+                    <div class="sm-prob-row">
+                        <span class="sm-prob-label">予測価格±5%圏</span>
+                        <span class="sm-prob-value">${val.prob_within_5pct}%</span>
+                    </div>
+                    <div class="sm-prob-row">
+                        <span class="sm-prob-label">予測価格±10%圏</span>
+                        <span class="sm-prob-value">${val.prob_within_10pct}%</span>
+                    </div>
+                </div>
+            `;
+        }
+        // 価格帯分布
+        let distHtml = '';
+        if (val.price_dist) {
+            const d = val.price_dist;
+            distHtml = `
+                <div class="sm-dist-section">
+                    <div class="sm-dist-title">価格帯確率分布</div>
+                    <div class="sm-dist-bar">
+                        <div class="sm-dist-segment sm-dist-p10" title="下位10%: ${d.p10.toLocaleString()}以下">
+                            <span>${d.p10.toLocaleString()}</span>
+                        </div>
+                        <div class="sm-dist-segment sm-dist-p25" title="下位25%: ${d.p25.toLocaleString()}">
+                            <span>${d.p25.toLocaleString()}</span>
+                        </div>
+                        <div class="sm-dist-segment sm-dist-p50" title="中央値: ${d.p50.toLocaleString()}">
+                            <span>${d.p50.toLocaleString()}</span>
+                        </div>
+                        <div class="sm-dist-segment sm-dist-p75" title="上位25%: ${d.p75.toLocaleString()}">
+                            <span>${d.p75.toLocaleString()}</span>
+                        </div>
+                        <div class="sm-dist-segment sm-dist-p90" title="上位10%: ${d.p90.toLocaleString()}以上">
+                            <span>${d.p90.toLocaleString()}</span>
+                        </div>
+                    </div>
+                    <div class="sm-dist-labels">
+                        <span>10%</span><span>25%</span><span>50%</span><span>75%</span><span>90%</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        card.innerHTML = `
+            <div class="sm-period">${label}</div>
+            <div class="sm-price">${val.price.toLocaleString()}</div>
+            <div class="sm-change ${changeClass}">${val.change_pct >= 0 ? '+' : ''}${val.change_pct}%</div>
+            ${probHtml}
+            ${distHtml}
+        `;
+        cards.appendChild(card);
+    });
+}
+
+function renderContributingEvents(events) {
+    if (!events || events.length === 0) return;
+
+    const container = document.getElementById('contributingEvents');
+    const list = document.getElementById('contribList');
+    container.style.display = 'block';
+    list.innerHTML = '';
+
+    const catColors = {};
+    categories.forEach(c => catColors[c.id] = c.color);
+
+    events.forEach(ev => {
+        const card = document.createElement('div');
+        card.className = 'contrib-card';
+        card.style.borderLeft = `3px solid ${catColors[ev.category] || '#3498db'}`;
+
+        const finalClass = ev.final_change >= 0 ? 'positive' : 'negative';
+        card.innerHTML = `
+            <div class="cc-name">${ev.event_name}</div>
+            <div class="cc-date">${ev.start_date}</div>
+            <div class="cc-stats">
+                <span class="cc-score">寄与度: ${ev.score}</span>
+                <span class="cc-drawdown">最大下落: ${ev.max_drawdown}%</span>
+                <span class="cc-final ${finalClass}">最終: ${ev.final_change >= 0 ? '+' : ''}${ev.final_change}%</span>
+            </div>
+        `;
+
+        // クリックでそのイベントの詳細を表示
+        card.addEventListener('click', () => {
+            const event = allEvents.find(e => e.id === ev.event_id);
+            if (event) showEventDetail(event);
+        });
+
+        list.appendChild(card);
+    });
+}
+
+// ===== Technical Indicators =====
+function renderTechnicalIndicators(data) {
+    if (!data.technical_indicators) return;
+
+    const container = document.getElementById('technicalPanel');
+    const grid = document.getElementById('techGrid');
+    container.style.display = 'block';
+    grid.innerHTML = '';
+
+    const ti = data.technical_indicators;
+
+    const signalLabels = {
+        overbought: '買われすぎ', oversold: '売られすぎ', neutral: 'ニュートラル',
+        bullish: '強気', bearish: '弱気', strong_bullish: '強い強気', strong_bearish: '強い弱気'
+    };
+    const signalClass = (s) => {
+        if (['bullish', 'strong_bullish', 'oversold'].includes(s)) return 'bullish';
+        if (['bearish', 'strong_bearish', 'overbought'].includes(s)) return 'bearish';
+        return 'neutral';
+    };
+
+    const indicators = [
+        { name: 'RSI (14)', value: ti.rsi_14, signal: ti.rsi_signal },
+        { name: 'MACD ヒストグラム', value: ti.macd_histogram, signal: ti.macd_signal },
+        { name: 'ボリンジャーバンド幅', value: ti.bollinger_width + '%', signal: null },
+        { name: 'ボリンジャー位置', value: ti.bollinger_percentile != null ? ti.bollinger_percentile + '%' : '-', signal: (ti.bollinger_percentile || 50) > 80 ? 'overbought' : ((ti.bollinger_percentile || 50) < 20 ? 'oversold' : 'neutral') },
+        { name: 'O-U 平均回帰速度 (θ)', value: ti.ou_theta, signal: null },
+        { name: 'O-U 長期平均 (μ)', value: typeof ti.ou_mu_price === 'number' ? ti.ou_mu_price.toLocaleString() : (ti.ou_mu_price || '-'), signal: null },
+        { name: 'モメンタムスコア', value: typeof ti.momentum_score === 'number' ? ti.momentum_score.toFixed(2) : ti.momentum_score, signal: ti.momentum_score > 0.5 ? 'bullish' : (ti.momentum_score < -0.5 ? 'bearish' : 'neutral') },
+        { name: 'ROC (5日)', value: ti.roc_5d ? ti.roc_5d + '%' : '-', signal: null },
+        { name: 'ROC (20日)', value: ti.roc_20d ? ti.roc_20d + '%' : '-', signal: null },
+        { name: 'ROC (60日)', value: ti.roc_60d ? ti.roc_60d + '%' : '-', signal: null }
+    ];
+
+    indicators.forEach(ind => {
+        const card = document.createElement('div');
+        card.className = 'tech-card';
+        let signalHtml = '';
+        if (ind.signal) {
+            const cls = signalClass(ind.signal);
+            const label = signalLabels[ind.signal] || ind.signal;
+            signalHtml = `<span class="tc-signal ${cls}">${label}</span>`;
+        }
+        card.innerHTML = `
+            <div class="tc-name">${ind.name}</div>
+            <div class="tc-value">${ind.value}</div>
+            ${signalHtml}
+        `;
+        grid.appendChild(card);
+    });
+}
+
+// ===== Model Components =====
+function renderModelComponents(data) {
+    if (!data.model_components) return;
+
+    const container = document.getElementById('modelPanel');
+    const weightsDiv = document.getElementById('modelWeights');
+    const detailsDiv = document.getElementById('modelDetails');
+    container.style.display = 'block';
+    weightsDiv.innerHTML = '';
+    detailsDiv.innerHTML = '';
+
+    const mc = data.model_components;
+    const w = mc.weights;
+
+    // Weight bar visualization
+    const weightItems = [
+        { key: 'historical_patterns', label: '歴史パターン', cls: 'w-hist', pct: w.historical_patterns },
+        { key: 'mean_reversion', label: '平均回帰', cls: 'w-mr', pct: w.mean_reversion },
+        { key: 'momentum', label: 'モメンタム', cls: 'w-mom', pct: w.momentum },
+        { key: 'cross_asset', label: 'クロスアセット', cls: 'w-cross', pct: w.cross_asset },
+        { key: 'regime_adjustment', label: 'レジーム', cls: 'w-regime', pct: w.regime_adjustment }
+    ];
+
+    weightItems.forEach(item => {
+        const bar = document.createElement('div');
+        bar.className = `weight-bar ${item.cls}`;
+        bar.style.flex = item.pct;
+        bar.textContent = `${item.label} ${Math.round(item.pct * 100)}%`;
+        weightsDiv.appendChild(bar);
+    });
+
+    // Detail cards for 30d and 90d breakdowns
+    const colors = { historical: '#3498db', mean_reversion: '#2ecc71', momentum: '#e67e22', cross_asset: '#9b59b6', regime: '#e74c3c' };
+    const labels = { historical: '歴史パターン', mean_reversion: '平均回帰 (O-U)', momentum: 'モメンタム', cross_asset: 'クロスアセット', regime: 'レジーム' };
+
+    ['at_30d', 'at_90d'].forEach(period => {
+        if (!mc[period] || Object.keys(mc[period]).length === 0) return;
+        const periodLabel = period === 'at_30d' ? '30日後の各モデル寄与 (%)' : '90日後の各モデル寄与 (%)';
+
+        const card = document.createElement('div');
+        card.className = 'model-detail-card';
+
+        let rows = '';
+        let total = 0;
+        Object.entries(mc[period]).forEach(([key, val]) => {
+            total += val;
+            const cls = val >= 0 ? 'md-positive' : 'md-negative';
+            rows += `<tr><td><span class="md-dot" style="background:${colors[key] || '#ccc'}"></span> ${labels[key] || key}</td><td class="${cls}">${val >= 0 ? '+' : ''}${val}%</td></tr>`;
+        });
+        const totalCls = total >= 0 ? 'md-positive' : 'md-negative';
+        rows += `<tr style="border-top:1px solid #e8ecf0;font-weight:700"><td>合計予測</td><td class="${totalCls}">${total >= 0 ? '+' : ''}${total.toFixed(2)}%</td></tr>`;
+
+        card.innerHTML = `
+            <div class="md-title">${periodLabel}</div>
+            <table>${rows}</table>
+        `;
+        detailsDiv.appendChild(card);
+    });
+}
+
+// ===== Risk Metrics =====
+function renderRiskMetrics(data) {
+    if (!data.risk_metrics) return;
+
+    const container = document.getElementById('riskPanel');
+    const grid = document.getElementById('riskGrid');
+    container.style.display = 'block';
+    grid.innerHTML = '';
+
+    const rm = data.risk_metrics;
+
+    const items = [
+        {
+            label: '予想最大ドローダウン',
+            value: rm.expected_max_drawdown + '%',
+            sub: 'モンテカルロ中央値',
+            risk: Math.abs(rm.expected_max_drawdown) > 15 ? 'danger' : (Math.abs(rm.expected_max_drawdown) > 8 ? 'warning' : 'ok')
+        },
+        {
+            label: 'ワーストケース下落',
+            value: rm.worst_case_drawdown + '%',
+            sub: '95パーセンタイル',
+            risk: Math.abs(rm.worst_case_drawdown) > 25 ? 'danger' : (Math.abs(rm.worst_case_drawdown) > 15 ? 'warning' : 'ok')
+        },
+        {
+            label: 'シャープレシオ',
+            value: rm.sharpe_ratio,
+            sub: '予測リターン/リスク',
+            risk: rm.sharpe_ratio < 0 ? 'danger' : (rm.sharpe_ratio < 0.5 ? 'warning' : 'ok')
+        },
+        {
+            label: '年率ボラティリティ',
+            value: (rm.current_ewma_vol || rm.annualized_volatility || '-') + '%',
+            sub: 'EWMA推定',
+            risk: (rm.current_ewma_vol || rm.annualized_volatility || 0) > 25 ? 'danger' : ((rm.current_ewma_vol || rm.annualized_volatility || 0) > 18 ? 'warning' : 'ok')
+        }
+    ];
+
+    // Vol term structure if available
+    if (rm.vol_term_structure !== undefined) {
+        items.push({
+            label: 'ボラティリティ期間構造',
+            value: rm.vol_term_structure,
+            sub: '短期/長期比率',
+            risk: rm.vol_term_structure > 1.5 ? 'danger' : (rm.vol_term_structure > 1.2 ? 'warning' : 'ok')
+        });
+    }
+
+    // Add probability items
+    const probData = rm.prob_positive || rm.prob_positive_return;
+    if (probData) {
+        Object.entries(probData).forEach(([key, val]) => {
+            items.push({
+                label: `上昇確率 (${key})`,
+                value: val + '%',
+                sub: 'モンテカルロ推定',
+                risk: val > 60 ? 'ok' : (val > 40 ? 'warning' : 'danger')
+            });
+        });
+    }
+
+    items.forEach(item => {
+        const card = document.createElement('div');
+        card.className = `risk-card risk-${item.risk}`;
+        card.innerHTML = `
+            <div class="rc-label">${item.label}</div>
+            <div class="rc-value">${item.value}</div>
+            <div class="rc-sub">${item.sub}</div>
+        `;
+        grid.appendChild(card);
+    });
+}
+
+// ===== Cross Asset Signals =====
+function renderCrossAssetSignals(data) {
+    if (!data.cross_asset_signals || Object.keys(data.cross_asset_signals).length === 0) return;
+
+    const container = document.getElementById('crossAssetPanel');
+    const grid = document.getElementById('crossAssetGrid');
+    container.style.display = 'block';
+    grid.innerHTML = '';
+
+    const nameMap = {
+        vix: 'VIX 恐怖指数',
+        gold_spy_ratio: '金/SPY比率',
+        oil: '原油 (WTI)',
+        dxy: 'ドルインデックス',
+        yield_curve: 'イールドカーブ',
+        credit_spread: 'クレジットスプレッド'
+    };
+
+    const signalLabels = {
+        risk_off: 'リスクオフ',
+        risk_on: 'リスクオン',
+        neutral: 'ニュートラル',
+        inflation_pressure: 'インフレ圧力',
+        deflation: 'デフレ圧力',
+        tight_liquidity: '流動性引締め',
+        loose_liquidity: '流動性緩和',
+        inversion_warning: '逆イールド警告',
+        credit_stress: '信用ストレス',
+        healthy: '健全'
+    };
+
+    Object.entries(data.cross_asset_signals).forEach(([key, val]) => {
+        const card = document.createElement('div');
+        card.className = 'ca-card';
+
+        // z-score coloring
+        const zColor = val.z_score > 1 ? '#e74c3c' : (val.z_score < -1 ? '#27ae60' : '#7f8c9b');
+        const barPct = Math.min(100, Math.max(0, val.percentile));
+        const barColor = barPct > 70 ? '#e74c3c' : (barPct < 30 ? '#27ae60' : '#f39c12');
+
+        let extraInfo = '';
+        if (val.spread !== undefined) {
+            extraInfo = `<div style="font-size:0.72rem;color:#7f8c9b">スプレッド: ${val.spread}%</div>`;
+        }
+
+        card.innerHTML = `
+            <div class="ca-name">${nameMap[key] || key}</div>
+            <div class="ca-zscore" style="color:${zColor}">z = ${val.z_score}</div>
+            <div style="font-size:0.7rem;color:#95a5a6">パーセンタイル: ${val.percentile}%</div>
+            <div class="ca-bar"><div class="ca-bar-fill" style="width:${barPct}%;background:${barColor}"></div></div>
+            ${extraInfo}
+            <span class="ca-signal-tag ${val.signal}">${signalLabels[val.signal] || val.signal}</span>
+        `;
+        grid.appendChild(card);
+    });
+}
+
 // ===== Listeners =====
 function setupListeners() {
     document.getElementById('searchInput').addEventListener('input', filterEvents);
@@ -858,4 +1570,6 @@ function setupListeners() {
 
     document.getElementById('loadChart').addEventListener('click', loadStockChart);
     document.getElementById('loadCompare').addEventListener('click', loadCompareChart);
+    document.getElementById('loadPrediction').addEventListener('click', () => loadPrediction(false));
+    document.getElementById('predAutoRefresh').addEventListener('change', setupAutoRefresh);
 }
