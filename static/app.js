@@ -893,7 +893,7 @@ async function loadPrediction(silent) {
     if (predictionChart) { predictionChart.destroy(); predictionChart = null; }
 
     try {
-        const resp = await fetch(`/api/predict/${encodeURIComponent(symbol)}?forecast_days=${forecastDays}`);
+        const resp = await fetch(`/api/predict/${encodeURIComponent(symbol)}?forecast_days=${forecastDays}&lookback_days=1825`);
         const data = await resp.json();
 
         if (data.error) {
