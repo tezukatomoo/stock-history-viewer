@@ -28,9 +28,24 @@
                 <div class="pred-selector">
                     <label>対象指標:
                         <select id="predSymbol">
-                            <option value="^GSPC">S&P 500</option>
-                            <option value="^IXIC">NASDAQ</option>
-                            <option value="ACWI">オールカントリー (ACWI)</option>
+                            <optgroup label="主要指数">
+                                <option value="^GSPC">S&P 500</option>
+                                <option value="^IXIC">NASDAQ</option>
+                                <option value="ACWI">オールカントリー (ACWI)</option>
+                                <option value="^N225">日経平均</option>
+                            </optgroup>
+                            <optgroup label="日本株 個別銘柄">
+                                <option value="7203.T">トヨタ自動車</option>
+                                <option value="9984.T">ソフトバンクG</option>
+                                <option value="6758.T">ソニーG</option>
+                                <option value="8306.T">三菱UFJ</option>
+                                <option value="9432.T">NTT</option>
+                                <option value="6861.T">キーエンス</option>
+                                <option value="4063.T">信越化学</option>
+                                <option value="7741.T">HOYA</option>
+                                <option value="8035.T">東京エレクトロン</option>
+                                <option value="6501.T">日立製作所</option>
+                            </optgroup>
                         </select>
                     </label>
                     <label>予測期間:
@@ -57,6 +72,11 @@
                 </div>
             </div>
 
+            <!-- アラートバナー -->
+            <div class="alerts-container" id="alertsContainer" style="display:none;">
+                <div class="alerts-list" id="alertsList"></div>
+            </div>
+
             <!-- 現在の市場状況 -->
             <div class="market-status" id="marketStatus" style="display:none;">
                 <div class="status-cards" id="statusCards"></div>
@@ -81,6 +101,20 @@
             <div class="prediction-summary" id="predSummary" style="display:none;">
                 <h3>予測サマリー</h3>
                 <div class="summary-cards" id="summaryCards"></div>
+            </div>
+
+            <!-- エクスポート・保存ボタン -->
+            <div class="export-panel" id="exportPanel" style="display:none;">
+                <button class="btn-export" id="exportCsv" title="CSV出力">📊 CSV出力</button>
+                <button class="btn-export" id="savePrediction" title="予測を保存">💾 予測を保存</button>
+                <button class="btn-export" id="showAccuracy" title="精度レポート">📈 精度レポート</button>
+            </div>
+
+            <!-- 予測精度レポート -->
+            <div class="accuracy-panel" id="accuracyPanel" style="display:none;">
+                <h3>予測精度レポート</h3>
+                <p class="hint">過去の予測結果と実際の価格を比較</p>
+                <div class="accuracy-list" id="accuracyList"></div>
             </div>
 
             <!-- テクニカル指標 -->
@@ -119,6 +153,13 @@
                 </div>
                 <div class="news-list" id="newsList"></div>
                 <p class="hint">RSSフィードより自動取得（15分更新）· Reuters / CNBC / MarketWatch / Yahoo Finance</p>
+            </div>
+
+            <!-- マクロ経済指標 (FRED) -->
+            <div class="macro-panel" id="macroPanel" style="display:none;">
+                <h3>マクロ経済指標</h3>
+                <p class="hint">FRED APIより取得（環境変数 FRED_API_KEY 設定時のみ）</p>
+                <div class="macro-grid" id="macroGrid"></div>
             </div>
 
             <!-- 寄与イベント -->

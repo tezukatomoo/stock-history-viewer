@@ -828,12 +828,12 @@ async function loadCompareChart() {
                     x: {
                         type: 'linear',
                         title: { display: true, text: 'イベント開始日からの日数', color: '#7f8c9b' },
-                        grid: { color: '#1a2040' },
+                        grid: { color: '#e8ecf0' },
                         ticks: { color: '#7f8c9b' }
                     },
                     y: {
                         title: { display: true, text: '変化率 (%)', color: '#7f8c9b' },
-                        grid: { color: '#1a2040' },
+                        grid: { color: '#e8ecf0' },
                         ticks: {
                             color: '#7f8c9b',
                             callback: v => (v > 0 ? '+' : '') + v + '%'
@@ -925,6 +925,7 @@ async function loadPrediction(silent) {
         document.getElementById('riskPanel').style.display = 'none';
         document.getElementById('crossAssetPanel').style.display = 'none';
         document.getElementById('newsPanel').style.display = 'none';
+        document.getElementById('macroPanel').style.display = 'none';
     }
 
     if (predictionChart) { predictionChart.destroy(); predictionChart = null; }
@@ -970,8 +971,17 @@ async function loadPrediction(silent) {
         // ニュースパネル
         renderNewsPanel(data);
 
+        // マクロ経済指標
+        renderMacroIndicators(data);
+
         // 寄与イベント
         renderContributingEvents(data.contributing_events);
+
+        // アラート
+        loadAlerts(symbol);
+
+        // エクスポートパネル表示
+        document.getElementById('exportPanel').style.display = 'flex';
 
         // 更新時刻表示
         updateLastRefreshTime();
@@ -1030,7 +1040,8 @@ function renderMarketStatus(data) {
     container.style.display = 'block';
     cards.innerHTML = '';
 
-    const symbolName = data.symbol === '^GSPC' ? 'S&P 500' : 'NASDAQ';
+    const symbolNames = {'^GSPC': 'S&P 500', '^IXIC': 'NASDAQ', 'ACWI': 'ACWI', '^N225': '日経平均'};
+    const symbolName = symbolNames[data.symbol] || data.symbol;
 
     // レジーム情報
     const regimeIcons = { bull: '🟢', bear: '🔴', high_volatility: '🟡', sideways: '⚪' };
@@ -1129,7 +1140,8 @@ function renderPredictionChart(data) {
     const upper80 = data.prediction.filter(p => p.upper_80).map(p => toDatePt(p, 'upper_80'));
     const lower80 = data.prediction.filter(p => p.lower_80).map(p => toDatePt(p, 'lower_80'));
 
-    const symbolName = data.symbol === '^GSPC' ? 'S&P 500' : 'NASDAQ';
+    const symbolNames = {'^GSPC': 'S&P 500', '^IXIC': 'NASDAQ', 'ACWI': 'ACWI', '^N225': '日経平均'};
+    const symbolName = symbolNames[data.symbol] || data.symbol;
 
     predictionChart = new Chart(ctx, {
         type: 'line',
@@ -1590,6 +1602,35 @@ function renderCrossAssetSignals(data) {
     });
 }
 
+// ===== Macro Indicators (FRED) =====
+function renderMacroIndicators(data) {
+    const panel = document.getElementById('macroPanel');
+    const grid = document.getElementById('macroGrid');
+    const fred = data.fred_indicators;
+    if (!fred || Object.keys(fred).length === 0) { panel.style.display = 'none'; return; }
+
+    const labelMap = {
+        'cpi_yoy': 'CPI (消費者物価)', 'unemployment': '失業率',
+        'fed_funds': 'FF金利', 'consumer_sentiment': '消費者信頼感',
+        'pmi_manufacturing': '製造業雇用', 'initial_claims': '新規失業保険申請',
+        'retail_sales': '小売売上高', 'housing_starts': '住宅着工件数',
+    };
+
+    grid.innerHTML = Object.entries(fred).map(([key, v]) => {
+        const label = labelMap[key] || key;
+        const isPositive = v.change >= 0;
+        const arrow = isPositive ? '▲' : '▼';
+        const cls = isPositive ? 'sent-up' : 'sent-down';
+        return `<div class="macro-card">
+            <div class="macro-label">${label}</div>
+            <div class="macro-value">${v.value}</div>
+            <div class="macro-change ${cls}">${arrow} ${v.change >= 0 ? '+' : ''}${v.change} (${v.change_pct >= 0 ? '+' : ''}${v.change_pct}%)</div>
+            <div class="macro-date">${v.date}</div>
+        </div>`;
+    }).join('');
+    panel.style.display = 'block';
+}
+
 // ===== Listeners =====
 function setupListeners() {
     document.getElementById('searchInput').addEventListener('input', filterEvents);
@@ -1612,4 +1653,140 @@ function setupListeners() {
     document.getElementById('loadCompare').addEventListener('click', loadCompareChart);
     document.getElementById('loadPrediction').addEventListener('click', () => loadPrediction(false));
     document.getElementById('predAutoRefresh').addEventListener('change', setupAutoRefresh);
+
+    // Export & Accuracy
+    document.getElementById('exportCsv').addEventListener('click', exportToCsv);
+    document.getElementById('savePrediction').addEventListener('click', savePrediction);
+    document.getElementById('showAccuracy').addEventListener('click', showAccuracyReport);
+}
+
+// ===== Alerts =====
+async function loadAlerts(symbol) {
+    try {
+        const resp = await fetch(`/api/alerts?symbol=${encodeURIComponent(symbol)}`);
+        const alerts = await resp.json();
+        const container = document.getElementById('alertsContainer');
+        const list = document.getElementById('alertsList');
+
+        if (!alerts || alerts.length === 0) {
+            container.style.display = 'none';
+            return;
+        }
+
+        container.style.display = 'block';
+        list.innerHTML = alerts.map(a => {
+            const cls = a.type === 'danger' ? 'alert-danger' : (a.type === 'warning' ? 'alert-warning' : (a.type === 'opportunity' ? 'alert-opportunity' : 'alert-info'));
+            return `<div class="alert-item ${cls}">
+                <span class="alert-icon">${a.icon}</span>
+                <div class="alert-body">
+                    <strong>${a.title}</strong>
+                    <span>${a.message}</span>
+                </div>
+            </div>`;
+        }).join('');
+    } catch (e) {
+        console.error('Alerts error:', e);
+    }
+}
+
+// ===== CSV Export =====
+function exportToCsv() {
+    if (!lastPredictionData) return;
+
+    const data = {
+        symbol: lastPredictionData.symbol,
+        last_price: lastPredictionData.last_price,
+        last_date: lastPredictionData.last_date,
+        regime: lastPredictionData.regime ? lastPredictionData.regime.label : '',
+        summary: lastPredictionData.summary,
+        technical_indicators: lastPredictionData.technical_indicators,
+        risk_metrics: lastPredictionData.risk_metrics,
+    };
+
+    const url = `/api/export/csv?symbol=${encodeURIComponent(data.symbol)}&data=${encodeURIComponent(JSON.stringify(data))}`;
+    window.open(url, '_blank');
+}
+
+// ===== Save Prediction =====
+async function savePrediction() {
+    if (!lastPredictionData) return;
+
+    const btn = document.getElementById('savePrediction');
+    btn.disabled = true;
+    btn.textContent = '保存中...';
+
+    try {
+        const resp = await fetch('/api/predictions/save', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                symbol: lastPredictionData.symbol,
+                last_price: lastPredictionData.last_price,
+                last_date: lastPredictionData.last_date,
+                regime: lastPredictionData.regime ? lastPredictionData.regime.label : '',
+                summary: lastPredictionData.summary,
+            })
+        });
+        const result = await resp.json();
+        btn.textContent = '✓ 保存完了';
+        setTimeout(() => { btn.textContent = '💾 予測を保存'; btn.disabled = false; }, 2000);
+    } catch (e) {
+        btn.textContent = '保存失敗';
+        setTimeout(() => { btn.textContent = '💾 予測を保存'; btn.disabled = false; }, 2000);
+    }
+}
+
+// ===== Accuracy Report =====
+async function showAccuracyReport() {
+    const panel = document.getElementById('accuracyPanel');
+    const list = document.getElementById('accuracyList');
+    panel.style.display = 'block';
+    list.innerHTML = '<div class="spinner" style="margin:20px auto"></div>';
+
+    try {
+        const resp = await fetch('/api/predictions/history');
+        const history = await resp.json();
+
+        if (!history || history.length === 0) {
+            list.innerHTML = '<p style="color:#7f8c9b;text-align:center;padding:20px">まだ保存された予測がありません。「予測を保存」ボタンで予測を保存してください。</p>';
+            return;
+        }
+
+        const periodLabels = {'30d': '30日', '60d': '60日', '90d': '3ヶ月', '180d': '6ヶ月', 'year_end': '年末'};
+
+        list.innerHTML = history.reverse().map(record => {
+            const accuracy = record.accuracy || {};
+            let rows = '';
+            for (const [key, acc] of Object.entries(accuracy)) {
+                const label = periodLabels[key] || key;
+                if (acc.status === 'verified') {
+                    const errCls = Math.abs(acc.error_pct) < 3 ? 'acc-good' : (Math.abs(acc.error_pct) < 7 ? 'acc-ok' : 'acc-bad');
+                    rows += `<div class="acc-row">
+                        <span class="acc-period">${label}</span>
+                        <span>予測: ${acc.predicted.toLocaleString()}</span>
+                        <span>実際: ${acc.actual.toLocaleString()}</span>
+                        <span class="${errCls}">誤差: ${acc.error_pct > 0 ? '+' : ''}${acc.error_pct}%</span>
+                    </div>`;
+                } else if (acc.status === 'pending') {
+                    rows += `<div class="acc-row">
+                        <span class="acc-period">${label}</span>
+                        <span>予測: ${acc.predicted.toLocaleString()}</span>
+                        <span class="acc-pending">検証まであと${acc.days_remaining}日</span>
+                    </div>`;
+                }
+            }
+            if (!rows) rows = '<div class="acc-row"><span class="acc-pending">データなし</span></div>';
+
+            return `<div class="acc-card">
+                <div class="acc-header">
+                    <strong>${record.symbol}</strong>
+                    <span>${record.saved_at ? record.saved_at.split('T')[0] : ''}</span>
+                    <span>基準値: ${record.last_price ? record.last_price.toLocaleString() : '-'}</span>
+                </div>
+                ${rows}
+            </div>`;
+        }).join('');
+    } catch (e) {
+        list.innerHTML = '<p style="color:#e74c3c">精度レポートの取得に失敗しました</p>';
+    }
 }

@@ -7,6 +7,7 @@ import numpy as np
 import feedparser
 import threading
 import time
+import re
 
 app = Flask(__name__)
 
@@ -111,8 +112,27 @@ def fetch_market_news(force=False):
                 if relevance == 0:
                     continue
 
-                pos = sum(1 for kw in POSITIVE_KEYWORDS if kw in content)
-                neg = sum(1 for kw in NEGATIVE_KEYWORDS if kw in content)
+                # Negation-aware sentiment scoring
+                sentences = re.split(r'[.!?。！？;；]', content)
+                pos = 0
+                neg = 0
+                negation_words = ['not', 'no', 'never', 'neither', 'nor', 'barely',
+                                  'hardly', 'fail', 'fails', 'failed', 'without',
+                                  'unlikely', 'ない', 'ず', 'ません']
+                for sent in sentences:
+                    sent_lower = sent.lower().strip()
+                    if not sent_lower:
+                        continue
+                    has_negation = any(nw in sent_lower for nw in negation_words)
+                    sent_pos = sum(1 for kw in POSITIVE_KEYWORDS if kw in sent_lower)
+                    sent_neg = sum(1 for kw in NEGATIVE_KEYWORDS if kw in sent_lower)
+                    if has_negation:
+                        # Flip sentiment when negation detected
+                        pos += sent_neg
+                        neg += sent_pos
+                    else:
+                        pos += sent_pos
+                        neg += sent_neg
 
                 if pos > neg:
                     sentiment = 'bullish'
@@ -169,6 +189,97 @@ def _news_refresh_loop():
 
 _news_bg_thread = threading.Thread(target=_news_refresh_loop, daemon=True)
 _news_bg_thread.start()
+
+def estimate_garch11(returns, omega_init=0.00001, alpha_init=0.1, beta_init=0.85, n_iter=50):
+    """Simple GARCH(1,1) estimation via variance targeting + grid search.
+    sigma2(t) = omega + alpha * r(t-1)^2 + beta * sigma2(t-1)
+    Returns (omega, alpha, beta, conditional_variances)
+    """
+    T = len(returns)
+    if T < 30:
+        var = float(np.var(returns))
+        return var * 0.05, 0.1, 0.85, np.full(T, var)
+
+    # Variance targeting: omega = long_run_var * (1 - alpha - beta)
+    long_run_var = float(np.var(returns))
+
+    best_ll = -np.inf
+    best_params = (omega_init, alpha_init, beta_init)
+    best_sigma2 = None
+
+    # Grid search over alpha and beta
+    for alpha in [0.04, 0.06, 0.08, 0.10, 0.12, 0.15]:
+        for beta in [0.80, 0.82, 0.84, 0.86, 0.88, 0.90, 0.92]:
+            if alpha + beta >= 0.999:
+                continue
+            omega = long_run_var * (1 - alpha - beta)
+            if omega <= 0:
+                continue
+
+            sigma2 = np.zeros(T)
+            sigma2[0] = long_run_var
+
+            for t in range(1, T):
+                sigma2[t] = omega + alpha * returns[t-1]**2 + beta * sigma2[t-1]
+                if sigma2[t] <= 0:
+                    sigma2[t] = long_run_var
+
+            # Log-likelihood (Gaussian)
+            ll = -0.5 * np.sum(np.log(sigma2 + 1e-12) + returns**2 / (sigma2 + 1e-12))
+            if ll > best_ll:
+                best_ll = ll
+                best_params = (omega, alpha, beta)
+                best_sigma2 = sigma2.copy()
+
+    if best_sigma2 is None:
+        best_sigma2 = np.full(T, long_run_var)
+
+    return best_params[0], best_params[1], best_params[2], best_sigma2
+
+
+def fetch_fred_indicators():
+    """Fetch key macro indicators from FRED API (optional, requires FRED_API_KEY env var)"""
+    api_key = os.environ.get('FRED_API_KEY', '')
+    if not api_key:
+        return None
+
+    import requests as req
+    indicators = {}
+    series_map = {
+        'cpi_yoy': 'CPIAUCSL',           # CPI
+        'unemployment': 'UNRATE',          # Unemployment rate
+        'fed_funds': 'FEDFUNDS',           # Fed funds rate
+        'consumer_sentiment': 'UMCSENT',   # U of Michigan consumer sentiment
+        'pmi_manufacturing': 'MANEMP',     # Manufacturing employment (proxy)
+        'initial_claims': 'ICSA',          # Initial jobless claims
+        'retail_sales': 'RSXFS',           # Retail sales ex food services
+        'housing_starts': 'HOUST',         # Housing starts
+    }
+
+    for key, series_id in series_map.items():
+        try:
+            url = f'https://api.stlouisfed.org/fred/series/observations?series_id={series_id}&api_key={api_key}&file_type=json&sort_order=desc&limit=2'
+            r = req.get(url, timeout=10)
+            if r.status_code == 200:
+                obs = r.json().get('observations', [])
+                if len(obs) >= 2:
+                    current = float(obs[0]['value']) if obs[0]['value'] != '.' else None
+                    previous = float(obs[1]['value']) if obs[1]['value'] != '.' else None
+                    if current is not None and previous is not None:
+                        change = current - previous
+                        change_pct = (change / abs(previous) * 100) if previous != 0 else 0
+                        indicators[key] = {
+                            'value': round(current, 2),
+                            'previous': round(previous, 2),
+                            'change': round(change, 2),
+                            'change_pct': round(change_pct, 2),
+                            'date': obs[0]['date'],
+                        }
+        except Exception as e:
+            print(f"FRED error [{series_id}]: {e}")
+
+    return indicators if indicators else None
+
 
 # Load events data
 DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
@@ -430,19 +541,35 @@ def predict_stock(symbol):
         bb_width = float((bb_upper[-1] - bb_lower[-1]) / bb_sma[-1] * 100) if bb_sma[-1] != 0 else 5.0
         bb_percentile = float((closes[-1] - bb_lower[-1]) / (bb_upper[-1] - bb_lower[-1])) if (bb_upper[-1] - bb_lower[-1]) != 0 else 0.5
 
-        # Regime classification
-        if ma_cross_signal > 1.0 and bb_width < 8:
+        # Market regime classification with hysteresis
+        if ma_cross_signal > 1.5 and bb_width < 12:
             regime = 'bull'
-            regime_label = 'Bull (強気相場)'
-        elif ma_cross_signal < -1.0 and bb_width < 8:
+        elif ma_cross_signal < -1.5 or (ma_cross_signal < 0 and bb_width > 15):
             regime = 'bear'
-            regime_label = 'Bear (弱気相場)'
-        elif bb_width >= 8:
+        elif bb_width > 12:
             regime = 'high_volatility'
-            regime_label = 'High Volatility (高ボラティリティ)'
         else:
             regime = 'sideways'
-            regime_label = 'Sideways (レンジ相場)'
+
+        # Hysteresis: require stronger signal to change regime
+        # (Compare current RSI and momentum to avoid regime flip-flopping)
+        # Note: rsi_14 and momentum_score are computed later; use raw indicators here
+        # We use ma_cross_signal and bb_width as proxies for now
+        if regime == 'sideways':
+            # Use raw momentum proxy from ROC
+            _roc_proxy = float((closes[-1] / closes[-min(20, n):][0] - 1) * 100) if n > 1 else 0
+            if ma_cross_signal > 0.5 and _roc_proxy > 0:
+                regime = 'bull'
+            elif ma_cross_signal < -0.5 and _roc_proxy < 0:
+                regime = 'bear'
+
+        regime_labels = {
+            'bull': 'Bull (強気相場)',
+            'bear': 'Bear (弱気相場)',
+            'high_volatility': 'High Volatility (高ボラティリティ)',
+            'sideways': 'Sideways (レンジ相場)',
+        }
+        regime_label = regime_labels.get(regime, 'Sideways (レンジ相場)')
 
         # Regime weight multipliers for historical patterns
         regime_weights = {
@@ -501,21 +628,26 @@ def predict_stock(symbol):
         # ============================================================
         # 3. MOMENTUM FACTOR (モメンタム)
         # ============================================================
-        # RSI (14-day)
-        def calc_rsi(prices, period=14):
-            if len(prices) < period + 1:
-                return 50.0
-            deltas = np.diff(prices)
-            gains = np.where(deltas > 0, deltas, 0)
-            losses = np.where(deltas < 0, -deltas, 0)
-            avg_gain = np.mean(gains[-period:])
-            avg_loss = np.mean(losses[-period:])
+        # RSI (14-day) — Wilder's smoothed RSI
+        rsi_period = 14
+        closes_arr = closes
+        if len(closes_arr) < rsi_period + 1:
+            rsi_14 = 50.0
+        else:
+            deltas = np.diff(closes_arr)
+            gains_arr = np.where(deltas > 0, deltas, 0.0)
+            losses_arr = np.where(deltas < 0, -deltas, 0.0)
+            # Wilder's EMA (equivalent to EMA with alpha = 1/period)
+            avg_gain = np.mean(gains_arr[:rsi_period])
+            avg_loss = np.mean(losses_arr[:rsi_period])
+            for i in range(rsi_period, len(gains_arr)):
+                avg_gain = (avg_gain * (rsi_period - 1) + gains_arr[i]) / rsi_period
+                avg_loss = (avg_loss * (rsi_period - 1) + losses_arr[i]) / rsi_period
             if avg_loss == 0:
-                return 100.0
-            rs = avg_gain / avg_loss
-            return float(100 - (100 / (1 + rs)))
-
-        rsi_14 = calc_rsi(closes, 14)
+                rsi_14 = 100.0
+            else:
+                rs = avg_gain / avg_loss
+                rsi_14 = 100.0 - (100.0 / (1.0 + rs))
 
         # MACD (12, 26, 9)
         def calc_ema(data, span):
@@ -550,13 +682,22 @@ def predict_stock(symbol):
         roc_composite = np.clip((roc_5 * 4 + roc_10 * 3 + roc_20 * 2 + roc_60 * 1) / 10 * 10, -100, 100)
         momentum_score = float(rsi_signal * 0.3 + macd_signal_score * 0.4 + roc_composite * 0.3)
 
+        # Hysteresis: refine regime using RSI and momentum (now that they're computed)
+        if regime == 'sideways':
+            if rsi_14 > 60 and momentum_score > 0:
+                regime = 'bull'
+                regime_label = regime_labels.get('bull', 'Bull (強気相場)')
+            elif rsi_14 < 40 and momentum_score < 0:
+                regime = 'bear'
+                regime_label = regime_labels.get('bear', 'Bear (弱気相場)')
+
         # Momentum daily forecast (annualized)
         momentum_annual_pct = np.clip(momentum_score * 0.3, -50, 50)
         momentum_forecasts = {}
         for day in range(0, forecast_days + 1):
-            # Momentum decays over time (short-term signal)
-            decay = np.exp(-day / 30.0)
-            momentum_forecasts[day] = float(momentum_annual_pct * (day / 252.0) * decay)
+            # Scale by day proportion, but use longer decay (half-life = 60 days)
+            decay = np.exp(-day / 60.0)
+            momentum_forecasts[day] = momentum_annual_pct * (day / 252.0) * decay
 
         # ============================================================
         # 4. VOLATILITY MODEL (EWMA ボラティリティ)
@@ -859,13 +1000,19 @@ def predict_stock(symbol):
         # ============================================================
         # 7. COMPOSITE FORECAST (合成予測 + ベイズ更新)
         # ============================================================
-        # Weights: Historical 35%, Mean Reversion 20%, Momentum 15%,
-        #          Cross-Asset 15%, Regime Adjustment 15%
-        W_HIST = 0.35
-        W_MR = 0.20
-        W_MOM = 0.15
-        W_CROSS = 0.15
-        W_REGIME = 0.15
+        # Regime-specific model weights
+        regime_model_weights = {
+            'bull':            {'hist': 0.30, 'mr': 0.10, 'mom': 0.30, 'cross': 0.15, 'regime': 0.15},
+            'bear':            {'hist': 0.30, 'mr': 0.30, 'mom': 0.10, 'cross': 0.15, 'regime': 0.15},
+            'high_volatility': {'hist': 0.25, 'mr': 0.25, 'mom': 0.10, 'cross': 0.25, 'regime': 0.15},
+            'sideways':        {'hist': 0.35, 'mr': 0.25, 'mom': 0.15, 'cross': 0.15, 'regime': 0.10},
+        }
+        rw = regime_model_weights.get(regime, regime_model_weights['sideways'])
+        W_HIST = rw['hist']
+        W_MR = rw['mr']
+        W_MOM = rw['mom']
+        W_CROSS = rw['cross']
+        W_REGIME = rw['regime']
 
         # Regime adjustment: directional bias
         regime_bias_annual = {
@@ -965,13 +1112,45 @@ def predict_stock(symbol):
             })
 
         # ============================================================
+        # 7b. NEWS SENTIMENT ADJUSTMENT (before Monte Carlo)
+        # ============================================================
+        news_cache = fetch_market_news()
+        news_impact = news_cache['impact']
+        news_articles = news_cache['articles'][:10]
+        news_impact_pct = news_impact.get('price_impact_pct', 0)
+        if news_impact_pct != 0:
+            for pt in prediction:
+                day = pt['day']
+                decay = max(0.0, 1.0 - day / 60.0)
+                adj_pct = news_impact_pct * decay
+                if adj_pct != 0:
+                    pt['price'] = round(pt['price'] * (1 + adj_pct / 100), 2)
+                    pt['change_pct'] = round((pt['price'] / last_price - 1) * 100, 2)
+
+        # ============================================================
+        # 7c. GARCH(1,1) VOLATILITY FORECAST
+        # ============================================================
+        garch_omega, garch_alpha, garch_beta, garch_sigma2 = estimate_garch11(log_returns)
+        garch_last_var = garch_sigma2[-1]
+        garch_last_ret2 = log_returns[-1]**2
+        # Forecast conditional variance for each day
+        garch_forecast_var = np.zeros(forecast_days + 1)
+        garch_forecast_var[0] = garch_last_var
+        for d in range(1, forecast_days + 1):
+            if d == 1:
+                garch_forecast_var[d] = garch_omega + garch_alpha * garch_last_ret2 + garch_beta * garch_last_var
+            else:
+                garch_forecast_var[d] = garch_omega + (garch_alpha + garch_beta) * garch_forecast_var[d-1]
+        garch_forecast_vol = np.sqrt(garch_forecast_var) * np.sqrt(252)  # annualized
+
+        # ============================================================
         # 8. MONTE CARLO CONFIDENCE BANDS
         # ============================================================
-        n_simulations = 500
+        n_simulations = 1000
         sim_days = forecast_days
         dt = 1.0 / 252.0
 
-        # Use regime-specific volatility
+        # Use regime-specific volatility (fallback)
         vol_multiplier = {'bull': 0.8, 'bear': 1.3, 'high_volatility': 1.5, 'sideways': 0.9}
         sim_vol = ewma_vol_daily * vol_multiplier.get(regime, 1.0)
 
@@ -986,12 +1165,18 @@ def predict_stock(symbol):
         sim_paths[:, 0] = last_price
 
         np.random.seed(42)
+        # Student's t with df=5 for fat tails (captures crash scenarios better)
+        t_df = 5
         for sim in range(n_simulations):
             for d in range(1, sim_days + 1):
-                z = np.random.standard_normal()
+                z = np.random.standard_t(t_df)
+                # Scale t-distribution to have unit variance: var(t_df) = df/(df-2)
+                z = z / np.sqrt(t_df / (t_df - 2))
+                # Use GARCH forecast vol for this day
+                day_vol = np.sqrt(garch_forecast_var[min(d, forecast_days)]) if d <= forecast_days else sim_vol
                 sim_paths[sim, d] = sim_paths[sim, d - 1] * np.exp(
-                    (annual_drift - 0.5 * (sim_vol * np.sqrt(252))**2) * dt
-                    + sim_vol * np.sqrt(252) * np.sqrt(dt) * z
+                    (annual_drift - 0.5 * (day_vol * np.sqrt(252))**2) * dt
+                    + day_vol * np.sqrt(252) * np.sqrt(dt) * z
                 )
 
         # Calculate percentile bands
@@ -1198,27 +1383,8 @@ def predict_stock(symbol):
             'ou_mu_price': round(float(np.exp(mu_ou)), 2),
         }
 
-        # News sentiment impact
-        news_cache = fetch_market_news()
-        news_impact = news_cache['impact']
-        news_articles = news_cache['articles'][:10]
-
-        # Apply news impact as a short-term price adjustment
-        news_impact_pct = news_impact.get('price_impact_pct', 0)
-        if news_impact_pct != 0:
-            for pt in prediction:
-                day = pt['day']
-                # Decay: full impact for day 1-7, fades to 0 by day 60
-                decay = max(0.0, 1.0 - day / 60.0)
-                adj_pct = news_impact_pct * decay
-                if adj_pct != 0:
-                    pt['price'] = round(pt['price'] * (1 + adj_pct / 100), 2)
-                    pt['change_pct'] = round((pt['price'] / last_price - 1) * 100, 2)
-                    if 'upper_80' in pt:
-                        pt['upper_80'] = round(pt['upper_80'] * (1 + adj_pct / 100), 2)
-                        pt['upper_50'] = round(pt['upper_50'] * (1 + adj_pct / 100), 2)
-                        pt['lower_50'] = round(pt['lower_50'] * (1 + adj_pct / 100), 2)
-                        pt['lower_80'] = round(pt['lower_80'] * (1 + adj_pct / 100), 2)
+        # FRED macro indicators (optional)
+        fred_data = fetch_fred_indicators()
 
         # ============================================================
         # API RESPONSE
@@ -1256,6 +1422,7 @@ def predict_stock(symbol):
             'forecast_days': forecast_days,
             'news_impact': news_impact,
             'recent_news': news_articles,
+            'fred_indicators': fred_data,
         })
 
     except Exception as e:
@@ -1271,6 +1438,267 @@ def get_news():
         'impact': cache['impact'],
         'fetched_at': datetime.fromtimestamp(cache['timestamp']).strftime('%H:%M:%S') if cache['timestamp'] else None
     })
+
+
+# ============================================================
+# FEATURE 3: PREDICTION ACCURACY TRACKING (予測精度追跡)
+# ============================================================
+PREDICTIONS_FILE = os.path.join(os.path.dirname(__file__), 'data', 'predictions_history.json')
+
+
+def _load_predictions_history():
+    if os.path.exists(PREDICTIONS_FILE):
+        try:
+            with open(PREDICTIONS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+
+def _save_predictions_history(history):
+    try:
+        with open(PREDICTIONS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(history[-100:], f, ensure_ascii=False, indent=2)  # Keep last 100
+    except Exception as e:
+        print(f"[PredHistory] Save error: {e}")
+
+
+@app.route('/api/predictions/save', methods=['POST'])
+def save_prediction():
+    """Save a prediction snapshot for later accuracy comparison"""
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No data'}), 400
+
+    record = {
+        'id': datetime.now().strftime('%Y%m%d%H%M%S'),
+        'saved_at': datetime.now().isoformat(),
+        'symbol': data.get('symbol', ''),
+        'last_price': data.get('last_price', 0),
+        'last_date': data.get('last_date', ''),
+        'regime': data.get('regime', ''),
+        'summary': data.get('summary', {}),
+    }
+
+    history = _load_predictions_history()
+    history.append(record)
+    _save_predictions_history(history)
+
+    return jsonify({'status': 'saved', 'id': record['id']})
+
+
+@app.route('/api/predictions/history')
+def get_predictions_history():
+    """Return past predictions with accuracy comparison"""
+    history = _load_predictions_history()
+    results = []
+
+    for record in history:
+        symbol = record.get('symbol', '^GSPC')
+        saved_date = record.get('last_date', '')
+        summary = record.get('summary', {})
+
+        # Fetch current price for comparison
+        accuracy = {}
+        for period_key, pred_data in summary.items():
+            if not isinstance(pred_data, dict):
+                continue
+            pred_price = pred_data.get('price', 0)
+            if not pred_price:
+                continue
+
+            # Calculate days since prediction
+            try:
+                saved_dt = datetime.strptime(saved_date, '%Y-%m-%d')
+                days_elapsed = (datetime.now() - saved_dt).days
+                target_days = {'30d': 30, '60d': 60, '90d': 90, '180d': 180, 'year_end': (datetime(saved_dt.year, 12, 31) - saved_dt).days}
+                td = target_days.get(period_key, 0)
+                if td and days_elapsed >= td:
+                    # Period has elapsed - get actual price
+                    try:
+                        target_date = saved_dt + timedelta(days=td)
+                        ticker = yf.Ticker(symbol)
+                        hist = ticker.history(start=(target_date - timedelta(days=3)).strftime('%Y-%m-%d'),
+                                              end=(target_date + timedelta(days=3)).strftime('%Y-%m-%d'))
+                        if not hist.empty:
+                            actual_price = round(float(hist['Close'].iloc[-1]), 2)
+                            error_pct = round((pred_price - actual_price) / actual_price * 100, 2)
+                            accuracy[period_key] = {
+                                'predicted': pred_price,
+                                'actual': actual_price,
+                                'error_pct': error_pct,
+                                'status': 'verified'
+                            }
+                        else:
+                            accuracy[period_key] = {'predicted': pred_price, 'status': 'no_data'}
+                    except Exception:
+                        accuracy[period_key] = {'predicted': pred_price, 'status': 'error'}
+                else:
+                    accuracy[period_key] = {'predicted': pred_price, 'status': 'pending', 'days_remaining': max(0, td - days_elapsed)}
+            except Exception:
+                pass
+
+        results.append({**record, 'accuracy': accuracy})
+
+    return jsonify(results)
+
+
+# ============================================================
+# FEATURE 4: MARKET ALERTS (マーケットアラート)
+# ============================================================
+@app.route('/api/alerts')
+def get_alerts():
+    """Generate real-time market alerts based on current conditions"""
+    symbol = request.args.get('symbol', '^GSPC')
+
+    alerts = []
+
+    try:
+        ticker = yf.Ticker(symbol)
+        hist = ticker.history(period='3mo')
+        if hist.empty:
+            return jsonify([])
+
+        closes = np.array(hist['Close'].values, dtype=float)
+        n = len(closes)
+
+        # 1. RSI alerts
+        if n > 14:
+            deltas = np.diff(closes)
+            gains = np.where(deltas > 0, deltas, 0)
+            losses = np.where(deltas < 0, -deltas, 0)
+            avg_gain = np.mean(gains[-14:])
+            avg_loss = np.mean(losses[-14:])
+            rsi = 100 - (100 / (1 + avg_gain / avg_loss)) if avg_loss > 0 else 100
+            if rsi > 75:
+                alerts.append({'type': 'warning', 'icon': '⚠️', 'title': 'RSI過熱警告', 'message': f'RSI={rsi:.1f}  買われすぎ圏。短期調整リスクが上昇。', 'priority': 2})
+            elif rsi < 25:
+                alerts.append({'type': 'opportunity', 'icon': '💡', 'title': 'RSI売られすぎ', 'message': f'RSI={rsi:.1f}  売られすぎ圏。反発の可能性。', 'priority': 2})
+
+        # 2. Large daily move
+        if n >= 2:
+            daily_change = (closes[-1] / closes[-2] - 1) * 100
+            if abs(daily_change) > 2:
+                direction = '急騰' if daily_change > 0 else '急落'
+                alerts.append({'type': 'danger' if daily_change < -2 else 'info', 'icon': '🔥', 'title': f'大幅{direction}',
+                               'message': f'直近の終値変動: {daily_change:+.2f}%', 'priority': 3})
+
+        # 3. Volatility spike
+        if n > 20:
+            recent_vol = float(np.std(np.diff(np.log(closes[-10:]))) * np.sqrt(252) * 100)
+            normal_vol = float(np.std(np.diff(np.log(closes[-60:]))) * np.sqrt(252) * 100) if n > 60 else recent_vol
+            if recent_vol > normal_vol * 1.5 and recent_vol > 20:
+                alerts.append({'type': 'warning', 'icon': '📊', 'title': 'ボラティリティ急上昇',
+                               'message': f'短期ボラ {recent_vol:.1f}% vs 通常 {normal_vol:.1f}%（{recent_vol/normal_vol:.1f}倍）', 'priority': 2})
+
+        # 4. Golden / Death cross
+        if n > 200:
+            sma50 = np.mean(closes[-50:])
+            sma200 = np.mean(closes[-200:])
+            sma50_prev = np.mean(closes[-51:-1])
+            sma200_prev = np.mean(closes[-201:-1])
+            if sma50_prev < sma200_prev and sma50 > sma200:
+                alerts.append({'type': 'opportunity', 'icon': '✨', 'title': 'ゴールデンクロス', 'message': '50日移動平均が200日移動平均を上抜け。強気シグナル。', 'priority': 3})
+            elif sma50_prev > sma200_prev and sma50 < sma200:
+                alerts.append({'type': 'danger', 'icon': '💀', 'title': 'デスクロス', 'message': '50日移動平均が200日移動平均を下抜け。弱気シグナル。', 'priority': 3})
+
+        # 5. Drawdown from recent high
+        if n > 5:
+            recent_high = float(np.max(closes[-60:])) if n >= 60 else float(np.max(closes))
+            drawdown = (closes[-1] / recent_high - 1) * 100
+            if drawdown < -10:
+                alerts.append({'type': 'danger', 'icon': '📉', 'title': '大幅ドローダウン',
+                               'message': f'直近高値から {drawdown:.1f}% 下落中。', 'priority': 3})
+            elif drawdown < -5:
+                alerts.append({'type': 'warning', 'icon': '📉', 'title': '調整局面', 'message': f'直近高値から {drawdown:.1f}% 下落。', 'priority': 1})
+
+        # 6. News impact alert
+        news = fetch_market_news()
+        impact = news.get('impact', {})
+        if abs(impact.get('price_impact_pct', 0)) > 0.5:
+            direction = '強気' if impact['price_impact_pct'] > 0 else '弱気'
+            alerts.append({'type': 'info', 'icon': '📰', 'title': f'ニュースセンチメント: {direction}',
+                           'message': f'推定影響: {impact["price_impact_pct"]:+.2f}%（{impact.get("article_count", 0)}件分析）', 'priority': 1})
+
+    except Exception as e:
+        alerts.append({'type': 'info', 'icon': 'ℹ️', 'title': 'アラート取得エラー', 'message': str(e), 'priority': 0})
+
+    alerts.sort(key=lambda x: x.get('priority', 0), reverse=True)
+    return jsonify(alerts)
+
+
+# ============================================================
+# FEATURE 5: CSV EXPORT (CSV出力)
+# ============================================================
+from flask import Response
+import csv
+import io
+
+
+@app.route('/api/export/csv')
+def export_csv():
+    """Export prediction summary as CSV"""
+    symbol = request.args.get('symbol', '^GSPC')
+    data_json = request.args.get('data', '')
+
+    if not data_json:
+        return jsonify({'error': 'No data provided'}), 400
+
+    try:
+        data = json.loads(data_json)
+    except Exception:
+        return jsonify({'error': 'Invalid JSON'}), 400
+
+    output = io.StringIO()
+    output.write('\ufeff')  # BOM for Excel UTF-8
+    writer = csv.writer(output)
+
+    # Header
+    writer.writerow(['予測レポート', '', '', ''])
+    writer.writerow(['シンボル', symbol, '基準日', data.get('last_date', '')])
+    writer.writerow(['現在値', data.get('last_price', ''), 'レジーム', data.get('regime', '')])
+    writer.writerow([])
+
+    # Summary
+    writer.writerow(['期間', '予測価格', '変化率(%)', '上昇確率(%)', '±5%圏確率(%)', '±10%圏確率(%)', 'P10', 'P25', 'P50(中央値)', 'P75', 'P90'])
+    summary = data.get('summary', {})
+    period_labels = {'30d': '30日後', '60d': '60日後', '90d': '3ヶ月後', '180d': '6ヶ月後', 'year_end': '年末'}
+    for key in ['30d', '60d', '90d', '180d', 'year_end']:
+        if key in summary:
+            s = summary[key]
+            dist = s.get('price_dist', {})
+            writer.writerow([
+                period_labels.get(key, key), s.get('price', ''), s.get('change_pct', ''),
+                s.get('prob_up', ''), s.get('prob_within_5pct', ''), s.get('prob_within_10pct', ''),
+                dist.get('p10', ''), dist.get('p25', ''), dist.get('p50', ''), dist.get('p75', ''), dist.get('p90', '')
+            ])
+
+    writer.writerow([])
+
+    # Technical indicators
+    tech = data.get('technical_indicators', {})
+    if tech:
+        writer.writerow(['テクニカル指標', '値'])
+        for k, v in tech.items():
+            writer.writerow([k, v])
+
+    writer.writerow([])
+
+    # Risk metrics
+    risk = data.get('risk_metrics', {})
+    if risk:
+        writer.writerow(['リスク指標', '値'])
+        for k, v in risk.items():
+            if isinstance(v, dict):
+                for kk, vv in v.items():
+                    writer.writerow([f'{k}_{kk}', vv])
+            else:
+                writer.writerow([k, v])
+
+    content = output.getvalue()
+    return Response(content, mimetype='text/csv',
+                    headers={'Content-Disposition': f'attachment; filename=prediction_{symbol}_{datetime.now().strftime("%Y%m%d")}.csv'})
 
 
 if __name__ == '__main__':
