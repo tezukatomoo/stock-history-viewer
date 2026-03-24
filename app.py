@@ -408,6 +408,10 @@ def get_stock_data(symbol):
         start_dt = datetime.strptime(start, '%Y-%m-%d') - timedelta(days=margin_days)
         end_dt = datetime.strptime(end, '%Y-%m-%d') + timedelta(days=margin_days)
 
+        # Yahoo Financeは1950年以前のデータがないためスキップ
+        if start_dt.year < 1950:
+            return jsonify({'error': 'No data available before 1950', 'symbol': symbol}), 404
+
         ticker = yf.Ticker(symbol)
         hist = ticker.history(start=start_dt.strftime('%Y-%m-%d'),
                               end=end_dt.strftime('%Y-%m-%d'))
@@ -455,6 +459,10 @@ def compare_stocks():
         try:
             start_dt = datetime.strptime(event['start_date'], '%Y-%m-%d') - timedelta(days=margin)
             end_dt = datetime.strptime(event['end_date'], '%Y-%m-%d') + timedelta(days=margin)
+
+            # 1950年以前はYahoo Financeにデータなし
+            if start_dt.year < 1950:
+                continue
 
             ticker = yf.Ticker(symbol)
             hist = ticker.history(start=start_dt.strftime('%Y-%m-%d'),
@@ -910,6 +918,10 @@ def predict_stock(symbol):
             try:
                 ev_start = datetime.strptime(event['start_date'], '%Y-%m-%d')
                 ev_end = datetime.strptime(event['end_date'], '%Y-%m-%d')
+
+                # 1950年以前はYahoo Financeにデータなし、スキップ
+                if ev_start.year < 1950:
+                    continue
 
                 pat_start = ev_start - timedelta(days=45)
                 pat_end = ev_end + timedelta(days=forecast_days + 10)
