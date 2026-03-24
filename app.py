@@ -15,6 +15,7 @@ app = Flask(__name__)
 # NEWS MONITORING (ニュース監視)
 # ============================================================
 NEWS_FEEDS = [
+    # --- US Major ---
     {'url': 'https://feeds.reuters.com/reuters/businessNews', 'source': 'Reuters Business'},
     {'url': 'https://feeds.reuters.com/reuters/topNews', 'source': 'Reuters'},
     {'url': 'https://feeds.reuters.com/reuters/JPBusinessNews', 'source': 'Reuters Japan'},
@@ -23,31 +24,65 @@ NEWS_FEEDS = [
     {'url': 'https://www.investing.com/rss/news_25.rss', 'source': 'Investing.com'},
     {'url': 'https://finance.yahoo.com/rss/topstories', 'source': 'Yahoo Finance'},
     {'url': 'https://www.forexlive.com/feed/news', 'source': 'ForexLive'},
+    {'url': 'https://feeds.bloomberg.com/markets/news.rss', 'source': 'Bloomberg Markets'},
+    {'url': 'https://feeds.a.dj.com/rss/RSSMarketsMain.xml', 'source': 'WSJ Markets'},
+    {'url': 'https://www.ft.com/rss/home', 'source': 'Financial Times'},
+    {'url': 'https://feeds.a.dj.com/rss/RSSBarrons.xml', 'source': "Barron's"},
+    {'url': 'https://seekingalpha.com/market_currents.xml', 'source': 'Seeking Alpha'},
+    {'url': 'https://feeds.feedburner.com/zerohedge/feed', 'source': 'ZeroHedge'},
+    # --- Europe ---
+    {'url': 'https://www.ecb.europa.eu/rss/press.html', 'source': 'ECB News'},
+    {'url': 'http://feeds.bbci.co.uk/news/business/rss.xml', 'source': 'BBC Business'},
+    {'url': 'https://www.theguardian.com/uk/business/rss', 'source': 'The Guardian Business'},
+    # --- Asia / Japan ---
+    {'url': 'https://assets.wor.jp/rss/rdf/nikkei/news.rdf', 'source': 'Nikkei'},
+    {'url': 'https://www3.nhk.or.jp/rss/news/cat5.xml', 'source': 'NHK Business'},
+    {'url': 'https://www.scmp.com/rss/91/feed', 'source': 'South China Morning Post'},
+    {'url': 'https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml&category=6511', 'source': 'Channel News Asia Business'},
+    # --- Central Banks ---
+    {'url': 'https://www.federalreserve.gov/feeds/press_all.xml', 'source': 'Federal Reserve'},
+    {'url': 'https://www.boj.or.jp/rss/whatsnew.xml', 'source': 'Bank of Japan'},
 ]
 
 MARKET_KEYWORDS = [
+    # English
     'fed', 'federal reserve', 'interest rate', 'inflation', 'gdp', 'earnings',
     'stock', 'market', 'nasdaq', 's&p', 'dow', 'economy', 'tariff', 'trade',
     'recession', 'jobs', 'unemployment', 'treasury', 'bond', 'yield', 'oil',
     'dollar', 'central bank', 'rate hike', 'rate cut', 'monetary', 'cpi', 'ppi',
-    'fomc', 'ecb', 'bank of japan', 'geopolitical', 'sanctions', 'debt', 'yen',
+    'fomc', 'ecb', 'boe', 'bank of japan', 'geopolitical', 'sanctions', 'debt', 'yen',
+    'euro', 'eurozone', 'lagarde', 'powell', 'semiconductor', 'crude oil',
+    'commodity', 'forex', 'nonfarm', 'housing', 'consumer confidence',
+    # Japanese
     '金利', '株式', '市場', 'インフレ', '為替', '経済', '日銀', '利上げ', '利下げ',
-    '景気', 'gdp', '雇用', '物価', '円安', '円高',
+    '景気', '雇用', '物価', '円安', '円高', '株価', 'GDP',
+    'デフレ', '景気後退', 'リセッション', '量的緩和', 'テーパリング',
+    '関税', '制裁', '戦争', '停戦', '原油', '半導体',
+    # Chinese
+    '股市', '央行', '降息',
 ]
 
 POSITIVE_KEYWORDS = [
+    # English
     'surge', 'rally', 'gains', 'record high', 'beats', 'exceeds', 'strong growth',
     'bullish', 'recovery', 'boost', 'rises', 'jumps', 'soars', 'optimism',
     'rate cut', 'stimulus', 'dovish', 'outperform', 'upgrade', 'expansion',
-    'profits rise', 'hiring', 'above expectations', '上昇', '回復', '好調', '利下げ', '堅調',
+    'profits rise', 'hiring', 'above expectations', 'bailout', 'easing',
+    'buyback', 'dividend', 'beat expectations', 'profit surge',
+    # Japanese
+    '上昇', '回復', '好調', '利下げ', '堅調', '量的緩和', '追加緩和', '景気回復',
 ]
 
 NEGATIVE_KEYWORDS = [
+    # English
     'crash', 'plunge', 'tumble', 'falls', 'declines', 'recession', 'slowdown',
     'misses', 'below expectations', 'concern', 'warning', 'rate hike', 'hawkish',
     'sell-off', 'fear', 'uncertainty', 'tariff', 'sanctions', 'war', 'crisis',
     'default', 'downgrade', 'layoffs', 'contraction', 'stagflation',
+    'bankruptcy', 'missile', 'invasion', 'tightening', 'miss expectations',
+    # Japanese
     '下落', '低下', '懸念', '利上げ', '悪化', '急落', 'リセッション',
+    '戦争', '侵攻', '破綻', 'デフォルト', '景気後退',
 ]
 
 _news_cache = {'articles': [], 'impact': {'score': 0, 'direction': 'neutral', 'price_impact_pct': 0, 'article_count': 0}, 'timestamp': 0}
