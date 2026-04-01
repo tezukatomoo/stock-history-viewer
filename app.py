@@ -914,14 +914,26 @@ def predict_stock(symbol):
         recent_vol = float(np.std(log_returns[-recent_window:])) * np.sqrt(252) if len(log_returns) >= recent_window else 0.2
 
         event_patterns = []
+
+        # Pre-filter events to reduce API calls (memory optimization for 512MB)
+        candidate_events = []
         for event in EVENTS_DATA['events']:
+            ev_start = datetime.strptime(event['start_date'], '%Y-%m-%d')
+            if ev_start.year < 1950:
+                continue
+            years_ago = (datetime.now() - ev_start).days / 365.25
+            pre_score = max(0.2, np.exp(-years_ago * 0.03))
+            cat = event.get('category', '')
+            regime_cat_weights = regime_weights.get(regime, {})
+            pre_score *= regime_cat_weights.get(cat, 1.0)
+            candidate_events.append((pre_score, event))
+        candidate_events.sort(key=lambda x: x[0], reverse=True)
+        candidate_events = candidate_events[:30]  # Top 30 only
+
+        for _, event in candidate_events:
             try:
                 ev_start = datetime.strptime(event['start_date'], '%Y-%m-%d')
                 ev_end = datetime.strptime(event['end_date'], '%Y-%m-%d')
-
-                # 1950年以前はYahoo Financeにデータなし、スキップ
-                if ev_start.year < 1950:
-                    continue
 
                 pat_start = ev_start - timedelta(days=45)
                 pat_end = ev_end + timedelta(days=forecast_days + 10)
